@@ -1,0 +1,15 @@
+schema_version = "1.4"
+
+[metadata]
+name = "harbor-mitm-replay-smoke"
+description = "Smoke task: write /app/result.txt for the record/replay check."
+
+[agent]
+timeout_sec = 600.0
+
+[verifier]
+timeout_sec = 120.0
+
+[environment]
+workdir = "/app"
+build_timeout_sec = 900.0
