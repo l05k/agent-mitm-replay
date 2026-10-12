@@ -26,6 +26,8 @@ uv sync --locked
 
 The upstream is an origin, without `/v1` or another API path. The proxy owns the path appended by LiteLLM.
 
+Use the provider's final endpoint origin. Responses with HTTP 301, 302, 303, 307, or 308 and a `Location` header are rejected with HTTP 400 (`unsafe_redirect`), including relative redirects. This prevents the model client from following an unrecorded request outside the proxy. Old cassettes containing redirects are rejected during replay too.
+
 ```bash
 export OPENAI_API_KEY=...
 uv run harbor-mitm-replay record \
@@ -53,9 +55,15 @@ cassettes/task-a/
 
 Treat a cassette as sensitive: it contains prompts, tool observations, and model responses. Do not commit it unless your project explicitly permits that.
 
+`api_base` and `session_id` are managed by the runner. Routing overrides in `llm_kwargs` or `llm_call_kwargs` (`api_base`, `base_url`, `client`, `custom_llm_provider`, `model_list`, `fallbacks`, and `model`) are rejected before starting processes; restored manifest options are checked too. The current Harbor adapter supports the `litellm` backend only. Normal generation parameters remain configurable.
+
+Runs are noninteractive: the runner passes Harbor's `--yes` and closes child stdin. Host environment templates in the task are confirmed automatically; missing required variables still fail Harbor's validation.
+
 ## Replay offline
 
 Stop or disconnect the provider before starting replay. The runner starts mitmproxy with no upstream fallback and sets `LITELLM_LOCAL_MODEL_COST_MAP=True` to prevent LiteLLM from downloading its model-price map.
+
+The runner merges `NO_PROXY` and `no_proxy` and adds `127.0.0.1`, `localhost`, and `::1`, so ambient HTTP proxy settings cannot reroute the local model hop. Other proxy settings and existing exclusions are retained.
 
 ```bash
 uv run harbor-mitm-replay replay \
@@ -125,6 +133,8 @@ Record and replay have different model latency. Compare filesystem variants usin
 - This project intentionally treats a request miss as an error. It does not silently record a new response or call the provider.
 - Harbor may exit zero even when a trial errored; inspect `result.json`, as the runner does.
 - Verifier LLM calls are a separate traffic source. Point them at a matching replay service or disable them for a fully offline run.
+
+The HTTP replay addon has no Harbor dependency. Harbor-specific launch options and result validation live in `runner.py`; the current CLI supports Harbor Terminus-2. Other evaluation frameworks must route all model traffic through the proxy and validate their own trial results. No Harbor source patch is required.
 
 ## Development
 

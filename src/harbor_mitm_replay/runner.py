@@ -18,6 +18,69 @@ class ReplayError(RuntimeError):
     """A recording or replay did not satisfy the experiment contract."""
 
 
+# Keys that would move model traffic off the mitmdump listener this runner owns,
+# so a recording could not observe (or a replay serve) those calls:
+# * ``api_base`` is the listener URL the runner passes with ``--agent-kwarg``;
+#   harbor/llms/lite_llm.py splats ``llm_call_kwargs`` over it.
+# * ``llm_backend`` selects the backend (terminus_2._init_llm): only "litellm"
+#   talks to ``api_base``, "tinker" builds a backend that ignores it entirely.
+# * inside ``llm_kwargs``/``llm_call_kwargs``: litellm main.py reads the endpoint
+#   from ``api_base`` and lets ``base_url`` overwrite it, reuses a caller
+#   ``client`` verbatim, re-routes on ``custom_llm_provider``, and dispatches
+#   ``model_list``/``fallbacks`` deployments with their own api_base/keys.
+#   A call-level ``model`` can also select a provider that ignores api_base.
+_REROUTING_AGENT_KEYS = ("api_base",)
+_REROUTING_LLM_KEYS = (
+    "api_base", "base_url", "client", "custom_llm_provider", "model_list",
+    "fallbacks", "model",
+)
+_NO_PROXY_LOOPBACK = ("127.0.0.1", "localhost", "::1")
+
+
+def _reject_rerouting_options(options: dict, *, source: str) -> None:
+    """Refuse agent or LLM kwargs that would bypass the recording proxy."""
+    bad = [key for key in _REROUTING_AGENT_KEYS if key in options]
+    if options.get("llm_backend") not in (None, "litellm"):
+        bad.append("llm_backend")
+    for key in ("llm_kwargs", "llm_call_kwargs"):
+        value = options.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, dict):
+            raise ReplayError(f"{source}: {key} must be a mapping")
+        bad += [f"{key}.{name}" for name in _REROUTING_LLM_KEYS if name in value]
+    if bad:
+        raise ReplayError(f"{source} cannot reroute model traffic: {', '.join(sorted(bad))}")
+
+
+def _merge_no_proxy(*values: str | None) -> str:
+    """Merge NO_PROXY entries, keeping configured exclusions and unblocking loopback."""
+    entries: list[str] = []
+    seen: set[str] = set()
+    for value in (*values, *_NO_PROXY_LOOPBACK):
+        for entry in (value or "").split(","):
+            entry = entry.strip()
+            if entry and entry.lower() not in seen:
+                seen.add(entry.lower())
+                entries.append(entry)
+    return ",".join(entries)
+
+
+def _child_env(env: dict[str, str] | None = None) -> dict[str, str]:
+    """Keep loopback client traffic local while preserving other proxy settings."""
+    overlay = {key: str(value) for key, value in (env or {}).items()}
+    no_proxy = _merge_no_proxy(
+        os.environ.get("NO_PROXY"),
+        os.environ.get("no_proxy"),
+        overlay.get("NO_PROXY"),
+        overlay.get("no_proxy"),
+    )
+    child = {**os.environ, **overlay, "NO_PROXY": no_proxy, "no_proxy": no_proxy}
+    child["HARBOR_TELEMETRY"] = "0"
+    child["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+    return child
+
+
 def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n")
 
@@ -141,10 +204,11 @@ def run_trial(
         raise ReplayError(f"Not a Harbor task directory: {task}")
     if not math.isfinite(minimum_reward):
         raise ReplayError("minimum_reward must be finite")
-    harbor, mitmdump = _binary("harbor"), _binary("mitmdump")
     overrides = dict(agent_kwargs or {})
-    if "api_base" in overrides or "session_id" in overrides:
-        raise ReplayError("api_base and session_id are managed by the recording")
+    if "session_id" in overrides:
+        raise ReplayError("session_id is managed by the recording")
+    _reject_rerouting_options(overrides, source="agent arguments")
+    harbor, mitmdump = _binary("harbor"), _binary("mitmdump")
     if mode == "record":
         if not model or not upstream:
             raise ReplayError("record requires --model and --upstream")
@@ -160,14 +224,24 @@ def run_trial(
         manifest = _read_json(cassette / "manifest.json")
         if manifest.get("schema_version") != 1:
             raise ReplayError("Unsupported cassette manifest version")
-        if model is not None and model != manifest["model"]:
+        recorded = {key: manifest.get(key) for key in ("model", "upstream", "agent_kwargs", "artifacts", "extra_instructions")}
+        if (
+            not isinstance(recorded["model"], str)
+            or not isinstance(recorded["upstream"], str)
+            or not isinstance(recorded["agent_kwargs"], dict)
+            or not isinstance(recorded["artifacts"], list)
+            or not isinstance(recorded["extra_instructions"], list)
+        ):
+            raise ReplayError(f"Cassette manifest is incomplete: {cassette / 'manifest.json'}")
+        if model is not None and model != recorded["model"]:
             raise ReplayError("Replay model must match the recording")
-        model, upstream = manifest["model"], manifest["upstream"]
-        options = dict(manifest["agent_kwargs"])
+        model, upstream = recorded["model"], recorded["upstream"]
+        options = dict(recorded["agent_kwargs"])
+        _reject_rerouting_options(options, source=f"Recorded agent options ({cassette / 'manifest.json'})")
         if any(options.get(key) != value for key, value in overrides.items()):
             raise ReplayError("Replay agent options must match the recording")
-        artifact_paths = list(artifacts if artifacts is not None else manifest["artifacts"])
-        instructions = list(extra_instructions if extra_instructions is not None else manifest["extra_instructions"])
+        artifact_paths = list(artifacts if artifacts is not None else recorded["artifacts"])
+        instructions = list(extra_instructions if extra_instructions is not None else recorded["extra_instructions"])
     parsed = urlsplit(upstream)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.path not in {"", "/"} or parsed.query or parsed.fragment or parsed.username or parsed.password:
         raise ReplayError("--upstream must be an HTTP(S) origin without path or credentials")
@@ -195,7 +269,7 @@ def run_trial(
     if mode == "record":
         proxy_command += ["-w", str(flows), "--set", "stream_large_bodies=1", "--set", "store_streamed_bodies=true"]
     harbor_command = [
-        harbor, "run", "--path", str(task), "--agent", "terminus-2", "--model", model,
+        harbor, "run", "--yes", "--path", str(task), "--agent", "terminus-2", "--model", model,
         "--n-concurrent", "1", "--n-attempts", "1", "--max-retries", "0",
         "--jobs-dir", str(output / "jobs"), "--job-name", "trial",
         "--agent-kwarg", f"api_base=http://127.0.0.1:{port}/v1",
@@ -214,17 +288,17 @@ def run_trial(
         harbor_command += ["--extra-instruction", instruction]
     for artifact in artifact_paths:
         harbor_command += ["--artifact", artifact]
-    child_env = {**os.environ, **(env or {}), "HARBOR_TELEMETRY": "0", "LITELLM_LOCAL_MODEL_COST_MAP": "True"}
+    child_env = _child_env(env)
     if mode == "replay":
         child_env["OPENAI_API_KEY"] = "offline-replay-placeholder"
     _write_json(output / "command.json", {"argv": harbor_command})
     print(f"{mode}: {output}", flush=True)
     with (output / "proxy.log").open("w") as proxy_log, (output / "harbor.log").open("w") as harbor_log:
-        proxy = subprocess.Popen(proxy_command, env=child_env, stdout=proxy_log, stderr=subprocess.STDOUT, start_new_session=True)
+        proxy = subprocess.Popen(proxy_command, env=child_env, stdin=subprocess.DEVNULL, stdout=proxy_log, stderr=subprocess.STDOUT, start_new_session=True)
         harbor_process = None
         try:
             _ready(proxy, port)
-            harbor_process = subprocess.Popen(harbor_command, env=child_env, stdout=harbor_log, stderr=subprocess.STDOUT, start_new_session=True)
+            harbor_process = subprocess.Popen(harbor_command, env=child_env, stdin=subprocess.DEVNULL, stdout=harbor_log, stderr=subprocess.STDOUT, start_new_session=True)
             harbor_exit = harbor_process.wait()
         finally:
             if harbor_process is not None:

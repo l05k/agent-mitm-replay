@@ -4,7 +4,8 @@ The addon is loaded by ``mitmdump -s addon.py`` and driven by three options:
 
 ``hrr_mode``
     ``record``: mitmdump records the flows itself (``-w flows.mitm``); the
-    addon only writes one audit line per completed response.
+    addon refuses redirecting responses and writes one audit line per
+    completed response.
     ``replay``: the addon loads the recorded flows, answers every request from
     the cassette and never lets a request reach the network. A request without
     a recorded response is answered with a synthetic 400.
@@ -29,10 +30,21 @@ and ``is_replay``:
 ``miss``
     replay: no record left for this request, answered with 400.
 ``error``
-    the flow failed; the line carries an extra ``error`` string.
+    the flow failed, or the addon refused the response; the line carries an
+    extra ``error`` string (``unsafe_redirect`` for a refused redirect).
 ``summary``
     written by ``done()`` with ``matched``, ``misses``, ``remaining``,
     ``total``, ``requests`` and ``errors``.
+
+HTTP redirects are refused, never followed: a response whose status is 301,
+302, 303, 307 or 308 and that carries a ``Location`` header -- absolute or
+relative, it makes no difference -- is answered locally with a 400
+``unsafe_redirect`` instead. The client only ever sees that 400, the
+``Location`` header is never forwarded, and the refusal counts as an ``error``
+(so a recording or replay that saw a redirect does not pass its audit). A
+cassette that still holds such a response is refused the same way during
+replay, instead of being served as a ``hit``. Any other response, redirect
+status without ``Location`` included, is left exactly as it is.
 
 Matching and consumption are borrowed from mitmproxy's ``ServerPlayback`` so
 that a recorded response is consumed exactly once, in recording order, per
@@ -48,6 +60,7 @@ import logging
 import os
 from typing import IO
 from typing import Any
+from typing import Callable
 from typing import Optional
 
 from mitmproxy import ctx
@@ -60,6 +73,15 @@ logger = logging.getLogger(__name__)
 
 MODE_RECORD = "record"
 MODE_REPLAY = "replay"
+
+# Redirects a client would follow on its own; following one leaves the recorded
+# upstream (or, during replay, asks for a URL the cassette cannot contain).
+REDIRECT_STATUS_CODES = frozenset({301, 302, 303, 307, 308})
+
+# Set on a flow whose response was replaced by the local redirect refusal. The
+# value is the refused upstream status code, so the refusal can be rebuilt
+# after mitmproxy consumed (and thereby overwrote) its body.
+REFUSAL_METADATA_KEY = "harbor_mitm_replay.unsafe_redirect"
 
 # ``ServerPlayback._hash()`` and ``ServerPlayback.next_flow()`` read the
 # ``server_replay_*`` options. mitmproxy's ``serverplayback`` addon registers
@@ -88,6 +110,55 @@ def _error_response(status_code: int, error_type: str, message: str) -> http.Res
     return http.Response.make(
         status_code, body.encode("utf-8"), {"content-type": "application/json"}
     )
+
+
+def _is_redirect(response: http.Response | None) -> bool:
+    """Whether ``response`` is an HTTP redirect that must be refused.
+
+    Any ``Location`` counts, absolute or relative: the client must never be
+    given an address to follow that the recording does not cover.
+    """
+    return (
+        response is not None
+        and response.status_code in REDIRECT_STATUS_CODES
+        and "location" in response.headers
+    )
+
+
+def _redirect_refusal(status_code: int, source: str) -> http.Response:
+    """The local 400 that replaces a redirecting response.
+
+    It carries no ``Location`` header and no upstream body, so the client
+    sees a plain local error and no address to follow. ``source`` names where
+    the redirect was seen (``upstream`` or ``cassette``).
+    """
+    return _error_response(
+        400,
+        "unsafe_redirect",
+        f"harbor_mitm_replay refused the HTTP {status_code} redirect from the "
+        f"{source}: redirects are not followed, recorded or replayed",
+    )
+
+
+def _one_shot_stream(body: bytes) -> Callable[[bytes], list[bytes]]:
+    """Stream callable that emits ``body`` once and drops everything else.
+
+    mitmproxy hands every upstream body chunk to ``flow.response.stream`` and
+    sends whatever comes back. Emitting the local body instead of the chunks
+    answers the client with it while the redirect body -- the reason the
+    response was refused -- never reaches the client and is never buffered.
+    """
+
+    body_emitted = False
+
+    def stream(data: bytes) -> list[bytes]:
+        nonlocal body_emitted
+        if body_emitted:
+            return []
+        body_emitted = True
+        return [body]
+
+    return stream
 
 
 class ReplayAddon:
@@ -247,23 +318,12 @@ class ReplayAddon:
             logger.exception(
                 "harbor_mitm_replay: replay failed for %s", _request_line(flow)
             )
-            self._errors += 1
             flow.response = _error_response(
                 503,
                 "replay_failed",
                 "harbor_mitm_replay failed to serve this request from the cassette",
             )
-            self._write_audit(
-                {
-                    "event": "error",
-                    "response_index": None,
-                    "request_sha256": _sha256(_raw_content(flow.request)),
-                    "response_sha256": None,
-                    "status_code": 503,
-                    "is_replay": False,
-                    "error": "replay_failed",
-                }
-            )
+            self._audit_error(flow, 503, "replay_failed")
 
     def _serve_from_cassette(self, flow: http.HTTPFlow) -> None:
         playback = self._playback
@@ -273,27 +333,29 @@ class ReplayAddon:
                 "refusing %s",
                 _request_line(flow),
             )
-            self._errors += 1
             flow.response = _error_response(
                 503,
                 "replay_not_configured",
                 "harbor_mitm_replay is not configured for replay",
             )
-            self._write_audit(
-                {
-                    "event": "error",
-                    "response_index": None,
-                    "request_sha256": _sha256(_raw_content(flow.request)),
-                    "response_sha256": None,
-                    "status_code": 503,
-                    "is_replay": False,
-                    "error": "replay_not_configured",
-                }
-            )
+            self._audit_error(flow, 503, "replay_not_configured")
             return
 
         recorded = playback.next_flow(flow)
         if recorded is not None and recorded.response is not None:
+            if _is_redirect(recorded.response):
+                # Cassette from before redirects were refused: serving it would
+                # tell the client to follow an address this replay cannot know.
+                status_code = recorded.response.status_code
+                logger.warning(
+                    "harbor_mitm_replay: refusing the recorded HTTP %s redirect "
+                    "for %s",
+                    status_code,
+                    _request_line(flow),
+                )
+                flow.response = _redirect_refusal(status_code, "cassette")
+                self._audit_error(flow, 400, "unsafe_redirect")
+                return
             response = recorded.response.copy()
             # No refresh() and no waiting: the recorded response is replayed
             # verbatim, the original latency is not reproduced.
@@ -332,9 +394,67 @@ class ReplayAddon:
             }
         )
 
+    def responseheaders(self, flow: http.HTTPFlow) -> None:
+        """Refuse a redirecting response before mitmproxy delivers it.
+
+        ``responseheaders`` runs before mitmproxy picks how to deliver the
+        response body, so replacing ``flow.response`` here is what keeps the
+        ``Location`` header from ever reaching the client. The local answer
+        streams itself and drops the upstream body (``_one_shot_stream``); if
+        mitmproxy buffers the upstream body instead, it overwrites the body of
+        the local answer, which ``response()`` puts back before the flow is
+        audited and recorded.
+        """
+        if self._replay_active():
+            # Every replay response is generated locally and checked when it is
+            # picked from the cassette.
+            return
+        response = flow.response
+        if not _is_redirect(response):
+            return
+        status_code = response.status_code
+        logger.warning(
+            "harbor_mitm_replay: refusing the HTTP %s redirect for %s",
+            status_code,
+            _request_line(flow),
+        )
+        refusal = _redirect_refusal(status_code, "upstream")
+        refusal.stream = _one_shot_stream(refusal.raw_content or b"")
+        flow.metadata[REFUSAL_METADATA_KEY] = status_code
+        flow.response = refusal
+        # The refusal replaces a response that mitmdump writes to flows.mitm
+        # like any other, so it takes the next recorded index (``_total``) even
+        # though it is audited as an error.
+        self._total += 1
+        self._audit_error(flow, 400, "unsafe_redirect")
+
+    def _audit_error(self, flow: http.HTTPFlow, status_code: int, error: str) -> None:
+        """Count one refused flow and write its audit line."""
+        self._errors += 1
+        self._write_audit(
+            {
+                "event": "error",
+                "response_index": None,
+                "request_sha256": _sha256(_raw_content(flow.request)),
+                "response_sha256": None,
+                "status_code": status_code,
+                "is_replay": False,
+                "error": error,
+            }
+        )
+
     def response(self, flow: http.HTTPFlow) -> None:
         response = flow.response
         if response is None or self._replay_active():
+            return
+        if REFUSAL_METADATA_KEY in flow.metadata:
+            # mitmproxy has consumed the upstream body in the meantime and
+            # stored it in ``flow.response`` (an empty body when the upstream
+            # answer ended with its headers), which would hide the refusal.
+            # The refusal is audited already; only the answer is restored.
+            flow.response = _redirect_refusal(
+                flow.metadata[REFUSAL_METADATA_KEY], "upstream"
+            )
             return
         # _total doubles as the running index of recorded responses: it counts
         # the responses written to flows.mitm, in the order mitmdump wrote them.

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Refuse redirecting API responses before streaming them to the client, and reject redirects in existing cassettes with HTTP 400 (`unsafe_redirect`).
+- Reject agent and nested LLM routing overrides before starting processes, including options restored from the cassette manifest.
+- Merge both `NO_PROXY` spellings and exempt loopback model traffic while preserving existing exclusions and other proxy settings.
+- Run Harbor with `--yes` and closed child stdin so task environment templates cannot block on a hidden confirmation prompt.
+- Keep HTTP replay safety in the framework-independent addon and Harbor launch/result handling in the runner; no Harbor source changes.
+- Verify 62 behavior tests, stopped-upstream HTTP replay, legacy and streamed redirect refusal, and real Docker Harbor trials with host environment templates and an ambient proxy (zero proxy requests, matching artifacts, reward 1.0).
+
 ## 0.1.0
 
 - Add managed `record`, `replay`, and Docker `smoke` commands for Harbor Terminus-2.
