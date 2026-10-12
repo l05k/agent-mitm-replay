@@ -3,6 +3,29 @@ revision = 3
 requires-python = "==3.13.*"
 
 [[package]]
+name = "agent-mitm-replay"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "harbor" },
+    { name = "mitmproxy" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "harbor", specifier = "==0.24.0" },
+    { name = "mitmproxy", specifier = "==12.2.3" },
+]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=8.4,<10" }]
+
+[[package]]
 name = "aiohappyeyeballs"
 version = "2.7.1"
 source = { registry = "https://pypi.org/simple" }
@@ -614,29 +637,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/82/7d/16e21cfd52938260d
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9e/63/0e3d788e8d1ed116125507c6a01e3fb95cf82be71f2ea7040a1458709d21/harbor-0.24.0-py3-none-any.whl", hash = "sha256:23b7ba616a3aae4eff561ced5e2c51c7186f2981e53a770dea9c689d3969877c", size = 2331740, upload-time = "2026-10-05T05:04:42.088Z" },
 ]
-
-[[package]]
-name = "harbor-mitm-replay"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "harbor" },
-    { name = "mitmproxy" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "harbor", specifier = "==0.24.0" },
-    { name = "mitmproxy", specifier = "==12.2.3" },
-]
-
-[package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=8.4,<10" }]
 
 [[package]]
 name = "hf-xet"

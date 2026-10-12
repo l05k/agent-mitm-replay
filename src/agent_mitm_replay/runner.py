@@ -216,7 +216,7 @@ def run_trial(
             "enable_summarize": False,
             "record_terminal_session": False,
             **overrides,
-            "session_id": f"hrr-{uuid.uuid4().hex}",
+            "session_id": f"amr-{uuid.uuid4().hex}",
         }
         artifact_paths = list(artifacts or [])
         instructions = list(extra_instructions or [])
@@ -263,8 +263,8 @@ def run_trial(
         "--listen-host", "127.0.0.1", "--listen-port", str(port),
         "--set", "connection_strategy=lazy", "--set", f"confdir={output / 'mitm-config'}",
         "--set", "server_replay_reuse=false", "--set", "server_replay_ignore_content=false",
-        "-s", str(addon), "--set", f"hrr_mode={mode}", "--set", f"hrr_flows={flows}",
-        "--set", f"hrr_audit={audit}",
+        "-s", str(addon), "--set", f"amr_mode={mode}", "--set", f"amr_flows={flows}",
+        "--set", f"amr_audit={audit}",
     ]
     if mode == "record":
         proxy_command += ["-w", str(flows), "--set", "stream_large_bodies=1", "--set", "store_streamed_bodies=true"]

@@ -1,7 +1,7 @@
 schema_version = "1.4"
 
 [metadata]
-name = "harbor-mitm-replay-smoke"
+name = "agent-mitm-replay-smoke"
 description = "Smoke task: write /app/result.txt for the record/replay check."
 
 [agent]

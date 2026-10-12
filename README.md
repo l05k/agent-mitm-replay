@@ -1,6 +1,6 @@
-# harbor-mitm-replay
+# agent-mitm-replay
 
-Scripted record/replay for [Harbor](https://github.com/harbor-framework/harbor) Terminus-2 trials using [mitmproxy](https://mitmproxy.org/).
+Scripted record/replay for agent model calls with [mitmproxy](https://mitmproxy.org/), currently integrated with [Harbor](https://github.com/harbor-framework/harbor) Terminus-2.
 
 The first run sends model requests to the real provider and stores a mitmproxy flow cassette. Later runs return those recorded responses from a local proxy. A replay miss is a hard HTTP 400 and never falls through to the provider.
 
@@ -19,6 +19,8 @@ Harbor 0.24.0 and mitmproxy 12.2.3 are pinned because their Python 3.12 dependen
 ## Install
 
 ```bash
+git clone git@github.com:l05k/agent-mitm-replay.git
+cd agent-mitm-replay
 uv sync --locked
 ```
 
@@ -30,7 +32,7 @@ Use the provider's final endpoint origin. Responses with HTTP 301, 302, 303, 307
 
 ```bash
 export OPENAI_API_KEY=...
-uv run harbor-mitm-replay record \
+uv run agent-mitm-replay record \
   --task /path/to/task \
   --cassette cassettes/task-a \
   --model openai/gpt-4o-mini \
@@ -66,7 +68,7 @@ Stop or disconnect the provider before starting replay. The runner starts mitmpr
 The runner merges `NO_PROXY` and `no_proxy` and adds `127.0.0.1`, `localhost`, and `::1`, so ambient HTTP proxy settings cannot reroute the local model hop. Other proxy settings and existing exclusions are retained.
 
 ```bash
-uv run harbor-mitm-replay replay \
+uv run agent-mitm-replay replay \
   --task /path/to/task \
   --cassette cassettes/task-a \
   --artifact /app/result.txt
@@ -77,7 +79,7 @@ A replay succeeds only when every recorded response is consumed exactly once, Ha
 To test divergence deliberately:
 
 ```bash
-uv run harbor-mitm-replay replay \
+uv run agent-mitm-replay replay \
   --task /path/to/task \
   --cassette cassettes/task-a \
   --extra-instruction 'Change the task so the recorded request must miss.'
@@ -90,7 +92,7 @@ This command should fail with a `ReplayError` after Harbor records a `BadRequest
 The smoke command uses a scripted local OpenAI-compatible server, so it does not consume provider tokens. It still runs a real Harbor Terminus-2 trial in Docker, records the model requests through mitmproxy, stops the fake upstream, and runs a second trial offline.
 
 ```bash
-uv run harbor-mitm-replay smoke --output smoke-output
+uv run agent-mitm-replay smoke --output smoke-output
 ```
 
 `--image` is intended for a local image containing `bash`, `tmux`, and `C.UTF-8`. Without it, the smoke helper builds the example task image from Docker Hub's `ubuntu:24.04`; the build needs Docker network access.
@@ -108,12 +110,12 @@ The smoke verifies:
 Use separate, freshly initialized host directories and bind each to the same container path. The example assumes the task's workspace is `/app`; copy all task inputs into each host directory before running.
 
 ```bash
-uv run harbor-mitm-replay record \
+uv run agent-mitm-replay record \
   --task /path/to/task --cassette cassettes/task-a \
   --model openai/gpt-4o-mini --upstream https://api.openai.com \
   --environment-kwarg 'mounts=[{"type":"bind","source":"/mnt/fs-a/task-a","target":"/app"}]'
 
-uv run harbor-mitm-replay replay \
+uv run agent-mitm-replay replay \
   --task /path/to/task --cassette cassettes/task-a \
   --environment-kwarg 'mounts=[{"type":"bind","source":"/mnt/fs-b/task-a","target":"/app"}]'
 ```
@@ -140,7 +142,7 @@ The HTTP replay addon has no Harbor dependency. Harbor-specific launch options a
 
 ```bash
 uv run pytest
-uv run harbor-mitm-replay --help
+uv run agent-mitm-replay --help
 ```
 
 The repository's permanent tests cover the replay boundary and result validation. The end-to-end smoke requires a working Docker daemon and is opt-in.

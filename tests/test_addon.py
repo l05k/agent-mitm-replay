@@ -28,10 +28,10 @@ from mitmproxy.addons.serverplayback import ServerPlayback
 from mitmproxy.test import taddons
 from mitmproxy.test import tflow
 
-from harbor_mitm_replay.addon import ReplayAddon
+from agent_mitm_replay.addon import ReplayAddon
 
 ADDON_PATH = (
-    Path(__file__).resolve().parents[1] / "src" / "harbor_mitm_replay" / "addon.py"
+    Path(__file__).resolve().parents[1] / "src" / "agent_mitm_replay" / "addon.py"
 )
 CHAT_URL = "https://api.openai.com/v1/chat/completions"
 BODY_A = '{"model": "m", "stream": true}'
@@ -103,7 +103,7 @@ def test_mitmdump_entry_point_loads_and_replays(tmp_path):
     audit = tmp_path / "audit.jsonl"
     with taddons.context(ServerPlayback(), module) as tctx:
         tctx.configure(
-            addon, hrr_mode="replay", hrr_flows=str(recorded), hrr_audit=str(audit)
+            addon, amr_mode="replay", amr_flows=str(recorded), amr_audit=str(audit)
         )
 
         hit = send(addon, flow(BODY_A))
@@ -133,7 +133,7 @@ def test_replay_serves_recorded_responses_in_order(tmp_path):
     addon = ReplayAddon()
     with taddons.context(ServerPlayback(), addon) as tctx:
         tctx.configure(
-            addon, hrr_mode="replay", hrr_flows=str(recorded), hrr_audit=str(audit)
+            addon, amr_mode="replay", amr_flows=str(recorded), amr_audit=str(audit)
         )
 
         first = send(addon, flow(BODY_A))
@@ -204,7 +204,7 @@ def test_replay_consumes_each_bucket_in_recording_order(tmp_path):
     addon = ReplayAddon()
     with taddons.context(ServerPlayback(), addon) as tctx:
         tctx.configure(
-            addon, hrr_mode="replay", hrr_flows=str(recorded), hrr_audit=str(audit)
+            addon, amr_mode="replay", amr_flows=str(recorded), amr_audit=str(audit)
         )
 
         assert send(addon, flow(BODY_B)).response.text == '{"which": "b1"}'
@@ -232,7 +232,7 @@ def test_replay_matches_the_raw_request_bytes(tmp_path):
     addon = ReplayAddon()
     with taddons.context(ServerPlayback(), addon) as tctx:
         tctx.configure(
-            addon, hrr_mode="replay", hrr_flows=str(recorded), hrr_audit=str(audit)
+            addon, amr_mode="replay", amr_flows=str(recorded), amr_audit=str(audit)
         )
 
         for variant in ('{"n": 1, "model": "m"}', '{"model": "m",  "n": 1}'):
@@ -264,7 +264,7 @@ def test_replay_reports_unconsumed_records(tmp_path):
     addon = ReplayAddon()
     with taddons.context(ServerPlayback(), addon) as tctx:
         tctx.configure(
-            addon, hrr_mode="replay", hrr_flows=str(recorded), hrr_audit=str(audit)
+            addon, amr_mode="replay", amr_flows=str(recorded), amr_audit=str(audit)
         )
 
         assert send(addon, flow(BODY_A)).response.text == '{"answer": 0}'
@@ -283,7 +283,7 @@ def test_replay_fails_closed_when_the_cassette_is_not_configured(tmp_path):
     addon = ReplayAddon()
     with taddons.context(ServerPlayback(), addon) as tctx:
         with pytest.raises(exceptions.OptionsError):
-            tctx.configure(addon, hrr_mode="replay", hrr_audit=str(audit))
+            tctx.configure(addon, amr_mode="replay", amr_audit=str(audit))
 
         refused = send(addon, flow(BODY_A))
         assert refused.response is not None, "a broken replay must not forward"
@@ -300,7 +300,7 @@ def test_record_audits_completed_responses_and_errors(tmp_path):
     audit = tmp_path / "audit.jsonl"
     addon = ReplayAddon()
     with taddons.context(ServerPlayback(), addon) as tctx:
-        tctx.configure(addon, hrr_mode="record", hrr_audit=str(audit))
+        tctx.configure(addon, amr_mode="record", amr_audit=str(audit))
 
         for body, response in ((BODY_A, '{"answer": 1}'), (BODY_B, '{"answer": 2}')):
             completed = flow(body, response)
@@ -356,21 +356,21 @@ def test_configure_rejects_unusable_replay_configuration(tmp_path):
 
         def reject(**overrides) -> None:
             kwargs = {
-                "hrr_mode": "replay",
-                "hrr_flows": paths["valid"],
-                "hrr_audit": paths["audit"],
+                "amr_mode": "replay",
+                "amr_flows": paths["valid"],
+                "amr_audit": paths["audit"],
             }
             kwargs.update(overrides)
             with pytest.raises(exceptions.OptionsError):
                 tctx.configure(addon, **kwargs)
 
-        reject(hrr_mode="nonsense")
-        reject(hrr_flows=None)  # replay needs a cassette
-        reject(hrr_audit=None)  # ... and an audit file
-        reject(hrr_flows="flows.mitm")  # paths must be absolute
-        reject(hrr_audit="audit.jsonl")
-        reject(hrr_flows=paths["missing"])  # not readable
-        reject(hrr_flows=paths["empty"])  # nothing to replay
+        reject(amr_mode="nonsense")
+        reject(amr_flows=None)  # replay needs a cassette
+        reject(amr_audit=None)  # ... and an audit file
+        reject(amr_flows="flows.mitm")  # paths must be absolute
+        reject(amr_audit="audit.jsonl")
+        reject(amr_flows=paths["missing"])  # not readable
+        reject(amr_flows=paths["empty"])  # nothing to replay
         reject(server_replay_ignore_content=True)  # would match loosely
 
         # Nothing above installed a cassette, so requests stay refused ...
@@ -381,9 +381,9 @@ def test_configure_rejects_unusable_replay_configuration(tmp_path):
         # ... while a valid configuration afterwards replays normally.
         tctx.configure(
             addon,
-            hrr_mode="replay",
-            hrr_flows=paths["valid"],
-            hrr_audit=paths["audit"],
+            amr_mode="replay",
+            amr_flows=paths["valid"],
+            amr_audit=paths["audit"],
         )
         assert send(addon, flow(BODY_A)).response.text == '{"ok": true}'
 
@@ -394,7 +394,7 @@ def test_replays_alongside_the_builtin_server_replay_addon(tmp_path):
     addon = ReplayAddon()
     with taddons.context(ServerPlayback(), addon) as tctx:
         tctx.configure(
-            addon, hrr_mode="replay", hrr_flows=str(recorded), hrr_audit=str(audit)
+            addon, amr_mode="replay", amr_flows=str(recorded), amr_audit=str(audit)
         )
         assert send(addon, flow(BODY_A)).response.text == '{"ok": true}'
 
@@ -410,7 +410,7 @@ def test_record_refuses_a_redirect_before_the_client_sees_it(tmp_path):
     audit = tmp_path / "audit.jsonl"
     addon = ReplayAddon()
     with taddons.context(ServerPlayback(), addon) as tctx:
-        tctx.configure(addon, hrr_mode="record", hrr_audit=str(audit))
+        tctx.configure(addon, amr_mode="record", amr_audit=str(audit))
 
         upstream = redirect_flow(BODY_A, 307, "https://redirected.example/v1/chat")
         send(addon, upstream)
@@ -472,7 +472,7 @@ def test_record_refuses_every_redirect_status(tmp_path, status, location):
     audit = tmp_path / "audit.jsonl"
     addon = ReplayAddon()
     with taddons.context(ServerPlayback(), addon) as tctx:
-        tctx.configure(addon, hrr_mode="record", hrr_audit=str(audit))
+        tctx.configure(addon, amr_mode="record", amr_audit=str(audit))
 
         upstream = redirect_flow(BODY_A, status, location)
         send(addon, upstream)
@@ -495,7 +495,7 @@ def test_record_leaves_responses_a_client_cannot_follow_alone(tmp_path):
     audit = tmp_path / "audit.jsonl"
     addon = ReplayAddon()
     with taddons.context(ServerPlayback(), addon) as tctx:
-        tctx.configure(addon, hrr_mode="record", hrr_audit=str(audit))
+        tctx.configure(addon, amr_mode="record", amr_audit=str(audit))
 
         # A 307 without a Location gives the client no address to follow.
         bare = flow(BODY_A, '{"answer": 1}', status=307)
@@ -533,7 +533,7 @@ def test_record_keeps_the_indices_of_the_responses_around_a_refusal(tmp_path):
     audit = tmp_path / "audit.jsonl"
     addon = ReplayAddon()
     with taddons.context(ServerPlayback(), addon) as tctx:
-        tctx.configure(addon, hrr_mode="record", hrr_audit=str(audit))
+        tctx.configure(addon, amr_mode="record", amr_audit=str(audit))
 
         first = flow(BODY_A, '{"answer": 1}')
         first.response.headers["date"] = RECORDED_DATE
@@ -587,7 +587,7 @@ def test_replay_serves_recorded_headers_and_bytes_verbatim(tmp_path):
     addon = ReplayAddon()
     with taddons.context(ServerPlayback(), addon) as tctx:
         tctx.configure(
-            addon, hrr_mode="replay", hrr_flows=str(recorded), hrr_audit=str(audit)
+            addon, amr_mode="replay", amr_flows=str(recorded), amr_audit=str(audit)
         )
 
         hit = send(addon, flow(BODY_A))
@@ -618,7 +618,7 @@ def test_replay_refuses_a_cassette_that_still_holds_a_redirect(tmp_path, status)
     addon = ReplayAddon()
     with taddons.context(ServerPlayback(), addon) as tctx:
         tctx.configure(
-            addon, hrr_mode="replay", hrr_flows=str(recorded), hrr_audit=str(audit)
+            addon, amr_mode="replay", amr_flows=str(recorded), amr_audit=str(audit)
         )
 
         refused = send(addon, flow(BODY_A))
@@ -657,7 +657,7 @@ def test_replay_still_consumes_a_bucket_after_a_recorded_redirect(tmp_path):
     addon = ReplayAddon()
     with taddons.context(ServerPlayback(), addon) as tctx:
         tctx.configure(
-            addon, hrr_mode="replay", hrr_flows=str(recorded), hrr_audit=str(audit)
+            addon, amr_mode="replay", amr_flows=str(recorded), amr_audit=str(audit)
         )
 
         refused = send(addon, flow(BODY_A))

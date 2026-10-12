@@ -4,7 +4,7 @@ import urllib.request
 
 import pytest
 
-from harbor_mitm_replay.runner import (
+from agent_mitm_replay.runner import (
     ReplayError,
     _child_env,
     check_harbor_result,
@@ -78,7 +78,7 @@ def make_cassette(tmp_path, **manifest):
         "schema_version": 1,
         "model": "openai/gpt-4o-mini",
         "upstream": "http://127.0.0.1:8080",
-        "agent_kwargs": {"session_id": "hrr-recorded"},
+        "agent_kwargs": {"session_id": "amr-recorded"},
         "artifacts": [],
         "extra_instructions": [],
         **manifest,

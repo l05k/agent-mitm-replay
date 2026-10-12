@@ -2,7 +2,7 @@
 
 The addon is loaded by ``mitmdump -s addon.py`` and driven by three options:
 
-``hrr_mode``
+``amr_mode``
     ``record``: mitmdump records the flows itself (``-w flows.mitm``); the
     addon refuses redirecting responses and writes one audit line per
     completed response.
@@ -10,10 +10,10 @@ The addon is loaded by ``mitmdump -s addon.py`` and driven by three options:
     the cassette and never lets a request reach the network. A request without
     a recorded response is answered with a synthetic 400.
 
-``hrr_flows``
+``amr_flows``
     Absolute path of the recorded ``flows.mitm`` file (required in replay).
 
-``hrr_audit``
+``amr_audit``
     Absolute path of the JSONL audit file (required in both modes).
 
 Every audit line is flushed immediately and carries ``event``,
@@ -81,7 +81,7 @@ REDIRECT_STATUS_CODES = frozenset({301, 302, 303, 307, 308})
 # Set on a flow whose response was replaced by the local redirect refusal. The
 # value is the refused upstream status code, so the refusal can be rebuilt
 # after mitmproxy consumed (and thereby overwrote) its body.
-REFUSAL_METADATA_KEY = "harbor_mitm_replay.unsafe_redirect"
+REFUSAL_METADATA_KEY = "agent_mitm_replay.unsafe_redirect"
 
 # ``ServerPlayback._hash()`` and ``ServerPlayback.next_flow()`` read the
 # ``server_replay_*`` options. mitmproxy's ``serverplayback`` addon registers
@@ -135,7 +135,7 @@ def _redirect_refusal(status_code: int, source: str) -> http.Response:
     return _error_response(
         400,
         "unsafe_redirect",
-        f"harbor_mitm_replay refused the HTTP {status_code} redirect from the "
+        f"agent_mitm_replay refused the HTTP {status_code} redirect from the "
         f"{source}: redirects are not followed, recorded or replayed",
     )
 
@@ -164,7 +164,7 @@ def _one_shot_stream(body: bytes) -> Callable[[bytes], list[bytes]]:
 class ReplayAddon:
     """Record audit and offline replay for Harbor model calls."""
 
-    name = "harbor_mitm_replay"
+    name = "agent_mitm_replay"
 
     def __init__(self) -> None:
         self._mode = MODE_RECORD
@@ -183,32 +183,32 @@ class ReplayAddon:
 
     def load(self, loader) -> None:
         loader.add_option(
-            "hrr_mode",
+            "amr_mode",
             str,
             MODE_RECORD,
-            "harbor_mitm_replay operation mode: 'record' audits the responses "
+            "agent_mitm_replay operation mode: 'record' audits the responses "
             "written by mitmdump -w, 'replay' serves every request from the "
             "recorded flows without ever contacting the network.",
             choices=[MODE_RECORD, MODE_REPLAY],
         )
         loader.add_option(
-            "hrr_flows",
+            "amr_flows",
             Optional[str],
             None,
-            "Absolute path of the recorded flows.mitm file. Required when hrr_mode=replay.",
+            "Absolute path of the recorded flows.mitm file. Required when amr_mode=replay."
         )
         loader.add_option(
-            "hrr_audit",
+            "amr_audit",
             Optional[str],
             None,
             "Absolute path of the JSONL audit file written by the addon. Required in both modes.",
         )
 
     def configure(self, updated) -> None:
-        mode = ctx.options.hrr_mode
+        mode = ctx.options.amr_mode
         if mode not in (MODE_RECORD, MODE_REPLAY):
             raise exceptions.OptionsError(
-                f"hrr_mode must be {MODE_RECORD!r} or {MODE_REPLAY!r}, got {mode!r}"
+                f"amr_mode must be {MODE_RECORD!r} or {MODE_REPLAY!r}, got {mode!r}"
             )
         if mode == MODE_REPLAY:
             # Latched before anything else is validated: once a run asked for
@@ -216,27 +216,27 @@ class ReplayAddon:
             # even if the cassette turned out to be broken.
             self._mode = MODE_REPLAY
 
-        audit_path = ctx.options.hrr_audit
+        audit_path = ctx.options.amr_audit
         if not audit_path:
             raise exceptions.OptionsError(
-                "hrr_audit must be set to the absolute path of the JSONL audit file"
+                "amr_audit must be set to the absolute path of the JSONL audit file"
             )
         if not os.path.isabs(audit_path):
             raise exceptions.OptionsError(
-                f"hrr_audit must be an absolute path, got {audit_path!r}"
+                f"amr_audit must be an absolute path, got {audit_path!r}"
             )
 
         if self._mode == MODE_REPLAY:
             self._require_strict_matching()
-            flows_path = ctx.options.hrr_flows
+            flows_path = ctx.options.amr_flows
             if not flows_path:
                 raise exceptions.OptionsError(
-                    "hrr_flows must be set to the absolute path of the recorded "
-                    "flows.mitm file when hrr_mode=replay"
+                    "amr_flows must be set to the absolute path of the recorded "
+                    "flows.mitm file when amr_mode=replay"
                 )
             if not os.path.isabs(flows_path):
                 raise exceptions.OptionsError(
-                    f"hrr_flows must be an absolute path, got {flows_path!r}"
+                    f"amr_flows must be an absolute path, got {flows_path!r}"
                 )
             if self._playback is None or self._flows_path != flows_path:
                 self._load_flows(flows_path)
@@ -260,7 +260,7 @@ class ReplayAddon:
             broken.append("server_replay")
         if broken:
             raise exceptions.OptionsError(
-                "hrr_mode=replay needs mitmproxy's built-in server replay to "
+                "amr_mode=replay needs mitmproxy's built-in server replay to "
                 "stay off and its matching to stay strict; unset "
                 + ", ".join(broken)
             )
@@ -274,11 +274,11 @@ class ReplayAddon:
                         flows.append(flow)
         except (OSError, exceptions.FlowReadException) as exc:
             raise exceptions.OptionsError(
-                f"hrr_flows: cannot read {flows_path}: {exc}"
+                f"amr_flows: cannot read {flows_path}: {exc}"
             ) from exc
         if not flows:
             raise exceptions.OptionsError(
-                f"hrr_flows: {flows_path} contains no HTTP flow with a response"
+                f"amr_flows: {flows_path} contains no HTTP flow with a response"
             )
 
         playback = ServerPlayback()
@@ -298,11 +298,11 @@ class ReplayAddon:
         """Whether requests must be served from the cassette.
 
         The mode is sticky for the lifetime of the process: a request that
-        arrives before ``configure()`` ran still sees hrr_mode=replay, and a
+        arrives before ``configure()`` ran still sees amr_mode=replay, and a
         later mode change can never turn a replay run into a forwarding one.
         """
         if self._mode != MODE_REPLAY:
-            if getattr(ctx.options, "hrr_mode", None) == MODE_REPLAY:
+            if getattr(ctx.options, "amr_mode", None) == MODE_REPLAY:
                 self._mode = MODE_REPLAY
         return self._mode == MODE_REPLAY
 
@@ -316,12 +316,12 @@ class ReplayAddon:
             # A request hook that returns without a response would be forwarded
             # to the recording upstream. Fail closed instead.
             logger.exception(
-                "harbor_mitm_replay: replay failed for %s", _request_line(flow)
+                "agent_mitm_replay: replay failed for %s", _request_line(flow)
             )
             flow.response = _error_response(
                 503,
                 "replay_failed",
-                "harbor_mitm_replay failed to serve this request from the cassette",
+                "agent_mitm_replay failed to serve this request from the cassette",
             )
             self._audit_error(flow, 503, "replay_failed")
 
@@ -329,14 +329,14 @@ class ReplayAddon:
         playback = self._playback
         if playback is None:
             logger.error(
-                "harbor_mitm_replay: hrr_mode=replay without a loaded cassette, "
+                "agent_mitm_replay: amr_mode=replay without a loaded cassette, "
                 "refusing %s",
                 _request_line(flow),
             )
             flow.response = _error_response(
                 503,
                 "replay_not_configured",
-                "harbor_mitm_replay is not configured for replay",
+                "agent_mitm_replay is not configured for replay",
             )
             self._audit_error(flow, 503, "replay_not_configured")
             return
@@ -348,7 +348,7 @@ class ReplayAddon:
                 # tell the client to follow an address this replay cannot know.
                 status_code = recorded.response.status_code
                 logger.warning(
-                    "harbor_mitm_replay: refusing the recorded HTTP %s redirect "
+                    "agent_mitm_replay: refusing the recorded HTTP %s redirect "
                     "for %s",
                     status_code,
                     _request_line(flow),
@@ -376,7 +376,7 @@ class ReplayAddon:
 
         self._misses += 1
         logger.warning(
-            "harbor_mitm_replay: no recorded response for %s", _request_line(flow)
+            "agent_mitm_replay: no recorded response for %s", _request_line(flow)
         )
         flow.response = _error_response(
             400,
@@ -414,7 +414,7 @@ class ReplayAddon:
             return
         status_code = response.status_code
         logger.warning(
-            "harbor_mitm_replay: refusing the HTTP %s redirect for %s",
+            "agent_mitm_replay: refusing the HTTP %s redirect for %s",
             status_code,
             _request_line(flow),
         )
@@ -501,7 +501,7 @@ class ReplayAddon:
             "errors": self._errors,
         }
         self._write_audit(summary)
-        logger.info("harbor_mitm_replay: %s", json.dumps(summary))
+        logger.info("agent_mitm_replay: %s", json.dumps(summary))
         audit, self._audit = self._audit, None
         self._audit_path = None
         audit.close()
@@ -516,7 +516,7 @@ class ReplayAddon:
             self._audit = open(path, "w", encoding="utf-8")
         except OSError as exc:
             raise exceptions.OptionsError(
-                f"hrr_audit: cannot open {path}: {exc}"
+                f"amr_audit: cannot open {path}: {exc}"
             ) from exc
         self._audit_path = path
         self._audit_missing_logged = False
@@ -526,7 +526,7 @@ class ReplayAddon:
         if audit is None:
             if not self._audit_missing_logged:
                 logger.error(
-                    "harbor_mitm_replay: no audit file is open, dropping audit records"
+                    "agent_mitm_replay: no audit file is open, dropping audit records"
                 )
                 self._audit_missing_logged = True
             return

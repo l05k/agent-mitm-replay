@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Rename the repository, distribution, and CLI to `agent-mitm-replay`, the Python package to `agent_mitm_replay`, and addon options to `amr_*`.
 - Refuse redirecting API responses before streaming them to the client, and reject redirects in existing cassettes with HTTP 400 (`unsafe_redirect`).
 - Reject agent and nested LLM routing overrides before starting processes, including options restored from the cassette manifest.
 - Merge both `NO_PROXY` spellings and exempt loopback model traffic while preserving existing exclusions and other proxy settings.

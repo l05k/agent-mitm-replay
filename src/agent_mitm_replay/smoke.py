@@ -30,7 +30,7 @@ MODEL = "openai/gpt-4o-mini"
 ARTIFACT_PATH = "/app/result.txt"
 ARTIFACT_CONTENT = b"harbor-replay-smoke\n"
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
-TASK_NAME = "harbor-mitm-replay-smoke"
+TASK_NAME = "agent-mitm-replay-smoke"
 
 #: The scripted upstream ignores auth, but LiteLLM still needs a key set.
 SCRIPTED_API_KEY = "scripted-smoke-upstream"
@@ -106,7 +106,7 @@ fi
 def _completion(*, content: str, index: int) -> dict[str, Any]:
     """One OpenAI Chat Completions response carrying *content*."""
     return {
-        "id": f"chatcmpl-harbor-mitm-smoke-{index}",
+        "id": f"chatcmpl-agent-mitm-smoke-{index}",
         "object": "chat.completion",
         "created": 0,
         "model": MODEL.split("/", 1)[1],
