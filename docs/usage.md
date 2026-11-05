@@ -20,7 +20,7 @@ The lifecycle is **record → validate once → replay for measurements**. Recor
 | `--output DIR` | New output directory. Defaults to `CASSETTE/record`, `CASSETTE/validation`, or `CASSETTE/replays/<id>`. Must not exist. |
 | `--mount HOST_DIR:CONTAINER_DIR` | Bind-mount task data into the container. Repeatable. Host paths are intentionally not saved: change them to select another NAS/filesystem, keeping container paths fixed. |
 
-`--minimum-reward N` is available for `record` and `validate` only. Record defaults to `1.0`; validate defaults to the threshold saved during recording.
+`--minimum-reward N` is available for `record` and `validate` only. Record defaults to `1.0`; validate defaults to the threshold saved during recording. An override becomes the acceptance threshold and is saved as `minimum_reward` in `validation.json`.
 
 ### Record-only options
 
@@ -37,11 +37,14 @@ These settings are restored automatically by validate/replay. Compose overlay fi
 
 ## Record
 
+Populate `/mnt/reference/task-a` with the task's initial data before recording; keep the container mount path `/app` unchanged for validation and measurement.
+
 ```bash
 export OPENAI_API_KEY=...
 uv run agent-mitm-replay record \
   --task /path/to/task --cassette cassettes/task-a \
-  --model openai/gpt-4o-mini --upstream https://api.openai.com
+  --model openai/gpt-4o-mini --upstream https://api.openai.com \
+  --mount /mnt/reference/task-a:/app
 ```
 
 Record requires a successful Harbor trial with every reward at or above the threshold. It saves model responses, environment settings, task metadata, and the command trajectory. The command trajectory preserves tool names, arguments, ordering, and batches, including command durations; generated tool-call IDs and terminal output are excluded.
@@ -71,7 +74,8 @@ Restore the initial task data before validation, outside this tool's timer.
 
 ```bash
 uv run agent-mitm-replay validate \
-  --task /path/to/task --cassette cassettes/task-a
+  --task /path/to/task --cassette cassettes/task-a \
+  --mount /mnt/reference/task-a:/app
 ```
 
 The proxy returns response N for model call N, regardless of the request body. Validation succeeds only when:
@@ -79,7 +83,7 @@ The proxy returns response N for model call N, regardless of the request body. V
 - every recorded response is consumed, without exhaustion or proxy errors;
 - Harbor writes one single-step trial result without an exception;
 - every verifier reward meets the threshold;
-- the command trajectory equals the recording.
+- the command trajectory is nonempty and equals the recording.
 
 Success writes `validation.json`. Validation of an already accepted cassette is refused: subsequent runs use `replay`. A failed attempt writes no acceptance marker; use a new `--output` for a manual retry after correcting the environment. There are no automatic retries or provider fallbacks.
 

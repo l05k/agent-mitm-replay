@@ -49,6 +49,8 @@ The smoke test uses a scripted local model server, so it costs no tokens. It rec
 
 ### 2. Record a trial
 
+Populate `/mnt/reference/task-a` with the task's initial data, including hidden files, before recording. All phases below use the same container mount path `/app`; only the host directory changes for another filesystem.
+
 ```bash
 export OPENAI_API_KEY=...
 uv run agent-mitm-replay record \
@@ -56,18 +58,20 @@ uv run agent-mitm-replay record \
   --cassette cassettes/task-a \
   --model openai/gpt-4o-mini \
   --upstream https://api.openai.com \
-  --artifact /app/result.txt
+  --artifact /app/result.txt \
+  --mount /mnt/reference/task-a:/app
 ```
 
 `--upstream` is an origin only, with no `/v1` or other path. Recording fails unless the trial completes without errors and reaches a reward of at least `1.0`.
 
 ### 3. Validate once
 
-Restore the task's initial data before this run. The tool does not reset mounted directories.
+Restore the same initial data in `/mnt/reference/task-a` before this run. The tool does not reset mounted directories.
 
 ```bash
 uv run agent-mitm-replay validate \
-  --task /path/to/task --cassette cassettes/task-a
+  --task /path/to/task --cassette cassettes/task-a \
+  --mount /mnt/reference/task-a:/app
 ```
 
 This writes `cassettes/task-a/validation.json` only after task and command-trajectory checks pass. Treat validation as acceptance/warm-up, not a performance sample.

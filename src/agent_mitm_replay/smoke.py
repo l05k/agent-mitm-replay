@@ -116,6 +116,9 @@ def run_smoke(output: Path) -> dict:
     if server.requests != len(SCRIPT):
         raise ReplayError(f"Scripted model served {server.requests} requests, expected {len(SCRIPT)}")
     _checked(record)
+    recorded = json.loads((cassette / "commands.json").read_text())
+    if not recorded or "harbor-replay-smoke" not in json.dumps(recorded):
+        raise ReplayError(f"Recorded command trace does not contain the smoke command: {recorded}")
     overlay.unlink()  # Later phases must use the cassette copy.
 
     # The model server is gone from here on. A replay without the validation marker
@@ -133,11 +136,17 @@ def run_smoke(output: Path) -> dict:
     # Different prompt text must change the request bodies without breaking validation.
     instruction = task / "instruction.md"
     instruction.write_text(instruction.read_text() + INSTRUCTION_NOTE)
-    validation = run_trial("validate", task=task, cassette=cassette, output=output / "validation", env=env)
+    validation = run_trial("validate", task=task, cassette=cassette, output=output / "validation", env=env,
+                           minimum_reward=0.5)
     _checked(validation)
     marker = cassette / "validation.json"
     if not marker.is_file():
         raise ReplayError(f"Validate did not write {marker}")
+    if json.loads(marker.read_text())["minimum_reward"] != 0.5:
+        raise ReplayError("Validation marker did not preserve the effective reward threshold")
+    trajectory = json.loads((Path(validation["trial_dir"]) / "agent" / "trajectory.json").read_text())
+    if INSTRUCTION_NOTE.strip() not in trajectory["steps"][0]["message"]:
+        raise ReplayError("Validation prompt did not include the changed instruction")
 
     record_bytes = _artifact(record)
     if record_bytes != EXPECTED_ARTIFACT:

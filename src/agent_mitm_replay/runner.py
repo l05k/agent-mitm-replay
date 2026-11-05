@@ -115,11 +115,14 @@ def check_harbor_result(job: Path, minimum_reward: float | None) -> dict:
 def command_trace(trial_dir: Path) -> list:
     """Preserve command batches and arguments, excluding generated tool-call IDs."""
     trajectory = _read_json(trial_dir / "agent" / "trajectory.json")
-    return [
+    commands = [
         [{"function_name": call["function_name"], "arguments": call["arguments"]}
          for call in step["tool_calls"]]
         for step in trajectory["steps"] if step.get("tool_calls")
     ]
+    if not commands:
+        raise ReplayError(f"No tool calls in command trajectory: {trial_dir}")
+    return commands
 
 
 def run_trial(
@@ -258,5 +261,6 @@ def run_trial(
             "model_requests": proxy_summary["total"],
         })
     elif mode == "validate":
-        _write_json(validation, {"output": str(output), "reward": summary["reward"]})
+        _write_json(validation, {"output": str(output), "reward": summary["reward"],
+                                 "minimum_reward": minimum_reward})
     return summary

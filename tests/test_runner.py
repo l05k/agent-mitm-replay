@@ -84,6 +84,19 @@ def test_trace_lifecycle_gate_precedes_execution(tmp_path, validated, mode):
     assert not output.exists()
 
 
+@pytest.mark.parametrize("steps", [
+    [],
+    [{"source": "agent", "message": "done"}],
+    [{"source": "agent", "tool_calls": []}],
+])
+def test_command_trace_rejects_missing_tool_calls(tmp_path, steps):
+    agent = tmp_path / "agent"
+    agent.mkdir()
+    (agent / "trajectory.json").write_text(json.dumps({"steps": steps}))
+    with pytest.raises(ReplayError):
+        command_trace(tmp_path)
+
+
 def test_command_trace_preserves_batches_order_and_arguments(tmp_path):
     agent = tmp_path / "agent"
     agent.mkdir()
