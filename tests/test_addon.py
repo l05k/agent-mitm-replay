@@ -27,6 +27,13 @@ def flow(body: str, response: str | None = None) -> http.HTTPFlow:
     return tflow.tflow(req=request, resp=resp)
 
 
+def redirect(body: str, status: int = 307) -> http.HTTPFlow:
+    moved = flow(body, "moved")
+    moved.response.status_code = status
+    moved.response.headers["location"] = "https://elsewhere.example/v1/chat/completions"
+    return moved
+
+
 def cassette(path: Path, flows: list[http.HTTPFlow]) -> Path:
     with open(path, "wb") as fp:
         writer = mitmproxy_io.FlowWriter(fp)
@@ -103,3 +110,26 @@ def test_record_audits_one_line_per_model_call(tmp_path):
     assert [(line["event"], line.get("turn")) for line in lines] == [
         ("response", 1), ("response", 2), ("error", 3), ("summary", None)]
     assert lines[-1]["total"] == 2 and lines[-1]["errors"] == 1
+
+
+def test_replay_refuses_a_recorded_redirect(tmp_path):
+    answered, lines = replay(ReplayAddon(), tmp_path, [redirect(BODY_A), flow(BODY_B, "b")], [BODY_A, BODY_B])
+    refused = answered[0].response
+    assert refused.status_code == 400 and "location" not in refused.headers
+    assert json.loads(refused.text)["error"]["type"] == "unsafe_redirect"
+    assert answered[1].response.text == "b"
+    assert lines[-1]["errors"] == 1 and lines[-1]["remaining"] == 0
+
+
+def test_record_fails_on_a_redirect(tmp_path):
+    audit = tmp_path / "audit.jsonl"
+    addon = ReplayAddon()
+    with taddons.context(ServerPlayback(), addon) as tctx:
+        tctx.configure(addon, amr_mode="record", amr_audit=str(audit))
+        for f in (redirect(BODY_A, 301), flow(BODY_B, "ok")):
+            addon.request(f)
+            addon.response(f)
+        addon.done()
+    lines = audit_lines(audit)
+    assert [line["event"] for line in lines] == ["error", "response", "summary"]
+    assert lines[-1]["errors"] == 1

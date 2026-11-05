@@ -30,9 +30,15 @@ def _write_json(path: Path, value: object) -> None:
 
 
 def child_env(env: dict[str, str] | None = None) -> dict[str, str]:
-    child = {**os.environ, **(env or {})}
-    # The model hop goes to the local proxy; an ambient HTTP proxy must not take it.
-    no_proxy = ",".join(filter(None, [child.get("NO_PROXY") or child.get("no_proxy"), "127.0.0.1,localhost"]))
+    overlay = env or {}
+    child = {**os.environ, **overlay}
+    # Keep every existing exclusion from both spellings, then let the model hop to the
+    # local proxy bypass any ambient HTTP proxy.
+    entries = []
+    for source in (os.environ, overlay):
+        for key in ("NO_PROXY", "no_proxy"):
+            entries += [entry.strip() for entry in source.get(key, "").split(",") if entry.strip()]
+    no_proxy = ",".join(dict.fromkeys([*entries, "127.0.0.1", "localhost"]))
     child.update(NO_PROXY=no_proxy, no_proxy=no_proxy, HARBOR_TELEMETRY="0", LITELLM_LOCAL_MODEL_COST_MAP="True")
     return child
 
@@ -120,7 +126,7 @@ def run_trial(
         options = {"enable_summarize": False, "record_terminal_session": False,
                    **(agent_kwargs or {}), "session_id": f"amr-{uuid.uuid4().hex}"}
         artifacts, extra_instructions = list(artifacts or []), list(extra_instructions or [])
-        cassette.mkdir(parents=True, exist_ok=False)
+        cassette.mkdir(parents=True, mode=0o700, exist_ok=False)
     else:
         manifest = _read_json(cassette / "manifest.json")
         model, upstream, options = manifest["model"], manifest["upstream"], manifest["agent_kwargs"]
@@ -131,7 +137,7 @@ def run_trial(
     upstream = upstream.rstrip("/")
     flows = (cassette / "flows.mitm").resolve()
     output = (output or (cassette / "record" if mode == "record" else cassette / "replays" / uuid.uuid4().hex)).resolve()
-    output.mkdir(parents=True, exist_ok=False)
+    output.mkdir(parents=True, mode=0o700, exist_ok=False)
     audit = output / "proxy-audit.jsonl"
     port = _free_port()
     bin_dir = Path(sys.executable).parent

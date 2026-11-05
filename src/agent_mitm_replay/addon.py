@@ -11,6 +11,11 @@ unused recording has the same method, URL and body; each recording is used once,
 in recording order. Anything else is a *miss*: it gets HTTP 400 and never
 reaches the network.
 
+Redirects (3xx with ``Location``) count as errors, so the run fails. In replay
+the client gets a local 400 instead and cannot follow the redirect to the
+provider. In record the redirect has already reached the client; the failed run
+writes no manifest, so that cassette cannot be replayed.
+
 Audit lines: ``{"event": "response"|"hit"|"miss"|"error", "turn": n,
 "request_sha256": ...}``, then ``{"event": "summary", "matched", "misses",
 "remaining", "total", "requests", "errors"}``. The first turn where a replay
@@ -23,9 +28,22 @@ import json
 from mitmproxy import ctx, http, io
 from mitmproxy.addons.serverplayback import ServerPlayback
 
+REDIRECTS = {301, 302, 303, 307, 308}
+
 
 def _sha256(message: http.Message) -> str:
     return hashlib.sha256(message.raw_content or b"").hexdigest()
+
+
+def _is_redirect(response: http.Response) -> bool:
+    """The model client would follow it, leaving the proxy."""
+    return response.status_code in REDIRECTS and "location" in response.headers
+
+
+def _error_response(error_type: str, message: str) -> http.Response:
+    return http.Response.make(
+        400, json.dumps({"error": {"type": error_type, "message": message}}), {"content-type": "application/json"}
+    )
 
 
 class ReplayAddon:
@@ -66,6 +84,11 @@ class ReplayAddon:
         if not self._replaying():
             return
         recorded = self.playback.next_flow(flow)
+        if recorded is not None and _is_redirect(recorded.response):
+            self.errors += 1
+            flow.response = _error_response("unsafe_redirect", "the cassette holds a redirect; refusing to serve it")
+            self._log("error", flow)
+            return
         if recorded is not None:
             flow.response = recorded.response.copy()
             flow.is_replay = "response"
@@ -73,17 +96,21 @@ class ReplayAddon:
             self._log("hit", flow)
             return
         self.misses += 1
-        message = f"no recorded response for {flow.request.method} {flow.request.url}"
-        flow.response = http.Response.make(
-            400, json.dumps({"error": {"type": "replay_miss", "message": message}}),
-            {"content-type": "application/json"},
+        flow.response = _error_response(
+            "replay_miss", f"no recorded response for {flow.request.method} {flow.request.url}"
         )
         self._log("miss", flow)
 
     def response(self, flow: http.HTTPFlow) -> None:
-        if not self._replaying():
-            self.total += 1
-            self._log("response", flow)
+        if self._replaying():
+            return
+        self.total += 1
+        if _is_redirect(flow.response):
+            # The client may already be following it; fail the recording so it is never replayed.
+            self.errors += 1
+            self._log("error", flow)
+            return
+        self._log("response", flow)
 
     def error(self, flow: http.HTTPFlow) -> None:
         self.errors += 1

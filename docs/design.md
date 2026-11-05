@@ -31,4 +31,4 @@ Harbor needs no source patches. To use the addon with another framework, route a
 - **Verifier model calls are not covered.** If the verifier calls an LLM, disable it or give it its own replay setup.
 - **No stream timing.** Streamed response bytes are stored, but the original timing between events is not reproduced.
 - **Do not point the agent elsewhere.** Agent options such as `api_base` or `llm_kwargs.base_url` are not checked; setting them sends model calls around the proxy, and the record will be incomplete.
-- **No redirects.** The provider origin must answer directly. A redirect would be recorded as-is, and the model client could follow it outside the proxy.
+- **Redirects fail the run.** A 3xx response with a `Location` header is an error. In replay the agent gets HTTP 400 `unsafe_redirect` instead, so it cannot follow the redirect to the provider. In record the redirect has already reached the agent; the run fails and writes no manifest, so the cassette cannot be replayed. Use the provider's final origin.

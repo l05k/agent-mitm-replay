@@ -82,7 +82,7 @@ uv run agent-mitm-replay replay \
 
 Replay reads `manifest.json` and reuses the recorded model, upstream, and agent options. Artifacts and extra instructions also come from the manifest unless you pass `--artifact` or `--extra-instruction`. Mounts do not: pass `--mount` for the filesystem you want to test.
 
-Replay needs no API key and never contacts the provider. The runner sets a placeholder `OPENAI_API_KEY`, sets `LITELLM_LOCAL_MODEL_COST_MAP=True` so LiteLLM does not download its price map, and adds `127.0.0.1,localhost` to `NO_PROXY` so an ambient HTTP proxy cannot intercept the local model hop.
+Replay needs no API key. The proxy answers every request from the cassette or with HTTP 400, and refuses recorded redirects, so it does not forward model calls to the provider. This assumes the agent sends its model calls to the proxy: do not set `api_base` or `llm_kwargs.base_url` yourself (see [Design and limitations](design.md#limitations)). The runner sets a placeholder `OPENAI_API_KEY`, sets `LITELLM_LOCAL_MODEL_COST_MAP=True` so LiteLLM does not download its price map, and adds `127.0.0.1,localhost` to `NO_PROXY` and `no_proxy`, keeping existing entries from both spellings, so an ambient HTTP proxy cannot intercept the local model hop.
 
 ## When a run passes
 

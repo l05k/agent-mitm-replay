@@ -5,11 +5,11 @@ Record an agent's model calls once, then replay them offline on every later run.
 `agent-mitm-replay` puts a [mitmproxy](https://mitmproxy.org/) reverse proxy between the agent and the model provider. It currently drives [Harbor](https://github.com/harbor-framework/harbor) Terminus-2 trials.
 
 - **record**: requests go to the real provider; the responses are saved to a cassette.
-- **replay**: the proxy answers from the cassette. The provider is never contacted.
+- **replay**: the proxy answers from the cassette and does not forward requests to the provider.
 
 Use it when you want to change the task environment (filesystem, mounts, image setup) while keeping model sampling fixed. The task, container, terminal commands, verifier, and filesystem all run for real on every run. Only the model responses come from the cassette.
 
-Replay is strict. If the agent sends a request that is not in the cassette, the proxy returns HTTP 400 and the run fails. It never falls back to the provider.
+Replay is strict. If the agent sends a request that is not in the cassette, the proxy returns HTTP 400 and the run fails. It never falls back to the provider. A recorded redirect is refused the same way, so the model client cannot follow it out of the proxy. This holds as long as the agent sends its model calls to the proxy; see [Design and limitations](docs/design.md#limitations).
 
 ```mermaid
 flowchart LR
@@ -71,7 +71,7 @@ uv run agent-mitm-replay replay \
 Replay needs no API key. Model, agent options, artifacts, and extra instructions are restored from the cassette. Replay passes only when every recorded response is used exactly once and the verifier reward meets the threshold.
 
 > [!WARNING]
-> A cassette contains prompts, terminal output, file contents, and model responses. Treat it as sensitive and do not commit it unless your project allows that. See [SECURITY.md](SECURITY.md).
+> A cassette contains prompts, terminal output, file contents, model responses, and the full request headers, including the provider API key (`Authorization: Bearer ...`). Treat it as a secret and do not commit or share it unless your project allows that and you have removed the key. See [SECURITY.md](SECURITY.md).
 
 ## Documentation
 

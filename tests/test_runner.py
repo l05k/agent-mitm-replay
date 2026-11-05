@@ -57,3 +57,14 @@ def test_child_env_sends_loopback_past_an_ambient_proxy(monkeypatch, parent_no_p
     assert not urllib.request.proxy_bypass("api.openai.com")
     if parent_no_proxy:
         assert urllib.request.proxy_bypass("internal.example")
+
+
+def test_child_env_keeps_both_no_proxy_spellings_and_the_overlay(monkeypatch):
+    monkeypatch.setattr(os, "environ", {"HTTP_PROXY": "http://proxy.example:3128",
+                                        "NO_PROXY": "internal.example", "no_proxy": ".corp.example,internal.example"})
+    child = child_env({"no_proxy": "overlay.example"})
+    assert child["NO_PROXY"] == child["no_proxy"] == "internal.example,.corp.example,overlay.example,127.0.0.1,localhost"
+    monkeypatch.setattr(os, "environ", child)
+    for host in ("internal.example", "sub.corp.example", "overlay.example", "127.0.0.1", "localhost"):
+        assert urllib.request.proxy_bypass(host), host
+    assert not urllib.request.proxy_bypass("api.openai.com")
