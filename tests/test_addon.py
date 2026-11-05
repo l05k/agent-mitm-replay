@@ -372,6 +372,10 @@ def test_configure_rejects_unusable_replay_configuration(tmp_path):
         reject(amr_flows=paths["missing"])  # not readable
         reject(amr_flows=paths["empty"])  # nothing to replay
         reject(server_replay_ignore_content=True)  # would match loosely
+        reject(server_replay_ignore_host=True)
+        reject(server_replay_ignore_port=True)
+        reject(server_replay_ignore_params=["model"])
+        reject(server_replay_ignore_payload_params=["model"])
 
         # Nothing above installed a cassette, so requests stay refused ...
         refused = send(addon, flow(BODY_A))

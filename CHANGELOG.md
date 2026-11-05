@@ -3,6 +3,9 @@
 ## Unreleased
 
 - Rename the repository, distribution, and CLI to `agent-mitm-replay`, the Python package to `agent_mitm_replay`, and addon options to `amr_*`.
+- Reject agent and LLM option names that Harbor would strip into a rerouting option, such as `api_base `.
+- Validate every configured `[[steps]]` result: step exceptions, missing or unexpected steps, and sub-threshold step rewards fail the run.
+- Refuse the remaining `server_replay_*` options that would loosen replay matching or reuse a record.
 - Refuse redirecting API responses before streaming them to the client, and reject redirects in existing cassettes with HTTP 400 (`unsafe_redirect`).
 - Reject agent and nested LLM routing overrides before starting processes, including options restored from the cassette manifest.
 - Merge both `NO_PROXY` spellings and exempt loopback model traffic while preserving existing exclusions and other proxy settings.

@@ -76,6 +76,10 @@ uv run agent-mitm-replay replay \
 
 A replay succeeds only when every recorded response is consumed exactly once, Harbor has no trial exception, and every verifier reward meets the threshold. The command checks persisted Harbor results instead of trusting Harbor's process exit code.
 
+For a task with `[[steps]]`, every configured step must report a verifier result and meet the same threshold; a step exception, a missing step, or an unexpected extra step fails the run.
+
+Agent and LLM option names must not be empty or padded with whitespace. Harbor strips those names, so `api_base ` would otherwise pass an exact-name check and still route model traffic past the proxy.
+
 To test divergence deliberately:
 
 ```bash
@@ -129,7 +133,7 @@ Record and replay have different model latency. Compare filesystem variants usin
 ## Experiment boundaries
 
 - Use one cassette and one proxy process per Harbor trial. Do not share a cassette across concurrent trials.
-- The replay key includes method, URL, and raw request body. Headers are not part of the key.
+- The replay key includes method, URL, and raw request body. Headers are not part of the key. The addon refuses the `server_replay_*` options that would loosen that key or consume a record more than once (`ignore_content`, `ignore_host`, `ignore_port`, `ignore_params`, `ignore_payload_params`, `reuse`, `nopop`) and mitmproxy's own `server_replay` addon.
 - The runner disables Harbor telemetry and remote LiteLLM price-map fetches; it does not globally firewall arbitrary network access by task commands or verifiers. Use your task's network policy when complete network isolation is required.
 - Streaming response bytes can be stored, but original inter-event timing is not reproduced.
 - This project intentionally treats a request miss as an error. It does not silently record a new response or call the provider.

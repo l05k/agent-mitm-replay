@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import time
+import tomllib
 from urllib.parse import urlsplit
 import uuid
 
@@ -37,6 +38,23 @@ _REROUTING_LLM_KEYS = (
 _NO_PROXY_LOOPBACK = ("127.0.0.1", "localhost", "::1")
 
 
+def _reject_padded_option_names(options: dict, *, source: str) -> None:
+    """Refuse names that Harbor would normalize into a different option.
+
+    Harbor strips ``--agent-kwarg`` keys, so ``"api_base "`` would pass an exact
+    name check here and still reach Harbor as ``api_base``.
+    """
+    bad = sorted(
+        repr(key)
+        for key in options
+        if not isinstance(key, str) or not key or key != key.strip()
+    )
+    if bad:
+        raise ReplayError(
+            f"{source} has empty or padded option names: {', '.join(bad)}"
+        )
+
+
 def _reject_rerouting_options(options: dict, *, source: str) -> None:
     """Refuse agent or LLM kwargs that would bypass the recording proxy."""
     bad = [key for key in _REROUTING_AGENT_KEYS if key in options]
@@ -48,6 +66,7 @@ def _reject_rerouting_options(options: dict, *, source: str) -> None:
             continue
         if not isinstance(value, dict):
             raise ReplayError(f"{source}: {key} must be a mapping")
+        _reject_padded_option_names(value, source=f"{source}: {key}")
         bad += [f"{key}.{name}" for name in _REROUTING_LLM_KEYS if name in value]
     if bad:
         raise ReplayError(f"{source} cannot reroute model traffic: {', '.join(sorted(bad))}")
@@ -136,7 +155,42 @@ def _ready(process: subprocess.Popen, port: int) -> None:
     raise ReplayError("mitmdump did not start within 15 seconds; inspect proxy.log")
 
 
-def check_harbor_result(job: Path, minimum_reward: float) -> dict:
+def _task_step_names(task: Path) -> list[str] | None:
+    """Configured multi-step names, or ``None`` for a single-step task."""
+    try:
+        config = tomllib.loads((task / "task.toml").read_text())
+    except (OSError, ValueError) as error:
+        raise ReplayError(f"Cannot read task config {task / 'task.toml'}: {error}") from error
+    steps = config.get("steps")
+    if steps is None:
+        return None
+    if not isinstance(steps, list) or not steps:
+        raise ReplayError("task.toml [[steps]] must be a non-empty list")
+    names = []
+    for step in steps:
+        name = step.get("name") if isinstance(step, dict) else None
+        if not isinstance(name, str) or not name:
+            raise ReplayError("Every task.toml [[steps]] entry needs a name")
+        names.append(name)
+    return names
+
+
+def _check_rewards(rewards: object, minimum_reward: float, *, where: str) -> dict:
+    if not isinstance(rewards, dict) or not rewards:
+        raise ReplayError(f"Harbor verifier produced no rewards: {where}")
+    for name, value in rewards.items():
+        if (
+            not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < minimum_reward
+        ):
+            raise ReplayError(f"Reward {name}={value!r} is below {minimum_reward}: {where}")
+    return rewards
+
+
+def check_harbor_result(
+    job: Path, minimum_reward: float, *, expected_steps: list[str] | None = None
+) -> dict:
     """Check persisted results: Harbor may return exit code zero on trial errors."""
     result = _read_json(job / "result.json")
     stats = result.get("stats", {})
@@ -154,12 +208,36 @@ def check_harbor_result(job: Path, minimum_reward: float) -> dict:
     trial = _read_json(trials[0])
     if trial.get("exception_info") is not None:
         raise ReplayError(f"Harbor trial exception: {trials[0]}")
-    rewards = (trial.get("verifier_result") or {}).get("rewards")
-    if not isinstance(rewards, dict) or not rewards:
-        raise ReplayError(f"Harbor verifier produced no rewards: {trials[0]}")
-    for name, value in rewards.items():
-        if not isinstance(value, (int, float)) or not math.isfinite(value) or value < minimum_reward:
-            raise ReplayError(f"Reward {name}={value!r} is below {minimum_reward}: {trials[0]}")
+    step_results = trial.get("step_results")
+    if expected_steps is None:
+        if step_results is not None:
+            raise ReplayError(
+                f"Single-step task produced step results; task.toml and trial disagree: {trials[0]}"
+            )
+    else:
+        if not isinstance(step_results, list):
+            raise ReplayError(f"Multi-step task produced no step results: {trials[0]}")
+        finished = []
+        for step in step_results:
+            if not isinstance(step, dict) or not isinstance(step.get("step_name"), str):
+                raise ReplayError(f"Malformed step result: {trials[0]}")
+            name = step["step_name"]
+            if step.get("exception_info") is not None:
+                raise ReplayError(f"Harbor step {name!r} failed: {trials[0]}")
+            if step.get("verifier_result") is None:
+                raise ReplayError(f"Harbor step {name!r} has no verifier result: {trials[0]}")
+            _check_rewards(
+                step["verifier_result"].get("rewards"), minimum_reward,
+                where=f"step {name!r} in {trials[0]}",
+            )
+            finished.append(name)
+        if sorted(finished) != sorted(expected_steps):
+            raise ReplayError(
+                f"Harbor steps {finished!r} do not match task.toml steps {expected_steps!r}: {trials[0]}"
+            )
+    rewards = _check_rewards(
+        (trial.get("verifier_result") or {}).get("rewards"), minimum_reward, where=str(trials[0])
+    )
     return {"rewards": rewards, "trial_dir": str(trials[0].parent)}
 
 
@@ -202,11 +280,13 @@ def run_trial(
     task, cassette = task.resolve(), cassette.resolve()
     if not (task / "task.toml").is_file() or not (task / "instruction.md").is_file():
         raise ReplayError(f"Not a Harbor task directory: {task}")
+    expected_steps = _task_step_names(task)
     if not math.isfinite(minimum_reward):
         raise ReplayError("minimum_reward must be finite")
     overrides = dict(agent_kwargs or {})
     if "session_id" in overrides:
         raise ReplayError("session_id is managed by the recording")
+    _reject_padded_option_names(overrides, source="agent arguments")
     _reject_rerouting_options(overrides, source="agent arguments")
     harbor, mitmdump = _binary("harbor"), _binary("mitmdump")
     if mode == "record":
@@ -237,6 +317,7 @@ def run_trial(
             raise ReplayError("Replay model must match the recording")
         model, upstream = recorded["model"], recorded["upstream"]
         options = dict(recorded["agent_kwargs"])
+        _reject_padded_option_names(options, source=f"Recorded agent options ({cassette / 'manifest.json'})")
         _reject_rerouting_options(options, source=f"Recorded agent options ({cassette / 'manifest.json'})")
         if any(options.get(key) != value for key, value in overrides.items()):
             raise ReplayError("Replay agent options must match the recording")
@@ -309,7 +390,9 @@ def run_trial(
     proxy_summary = check_proxy_audit(audit, mode)
     if harbor_exit != 0:
         raise ReplayError(f"Harbor failed with exit {harbor_exit}; inspect {output / 'harbor.log'}")
-    harbor_summary = check_harbor_result(output / "jobs/trial", minimum_reward)
+    harbor_summary = check_harbor_result(
+        output / "jobs/trial", minimum_reward, expected_steps=expected_steps
+    )
     summary = {"mode": mode, "model_requests": proxy_summary["total"], "reward": min(harbor_summary["rewards"].values()), "rewards": harbor_summary["rewards"], "output": str(output), "trial_dir": harbor_summary["trial_dir"]}
     _write_json(output / "summary.json", summary)
     if mode == "record":
