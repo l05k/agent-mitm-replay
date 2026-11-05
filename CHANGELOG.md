@@ -2,16 +2,17 @@
 
 ## Unreleased
 
+- Rewrite the README as a short overview and quick start; move the CLI reference, filesystem comparison guide, and design notes to `docs/`.
 - Rename the repository, distribution, and CLI to `agent-mitm-replay`, the Python package to `agent_mitm_replay`, and addon options to `amr_*`.
-- Reject agent and LLM option names that Harbor would strip into a rerouting option, such as `api_base `.
-- Validate every configured `[[steps]]` result: step exceptions, missing or unexpected steps, and sub-threshold step rewards fail the run.
-- Refuse the remaining `server_replay_*` options that would loosen replay matching or reuse a record.
-- Refuse redirecting API responses before streaming them to the client, and reject redirects in existing cassettes with HTTP 400 (`unsafe_redirect`).
-- Reject agent and nested LLM routing overrides before starting processes, including options restored from the cassette manifest.
-- Merge both `NO_PROXY` spellings and exempt loopback model traffic while preserving existing exclusions and other proxy settings.
+- Simplify to research-code scope: the addon matches with mitmproxy's `ServerPlayback` and writes one audit line per model call (`response`, `hit`, `miss`, `error` with `turn` and `request_sha256`) plus a summary. Routing-option and padded-name checks, multi-step result validation, and the smoke `--image` option are removed; multi-step trials now fail the run.
+- Redirects (3xx with `Location`) fail the run: replay answers a recorded redirect with HTTP 400 `unsafe_redirect` so the client cannot follow it to the provider, and recording counts one as an error.
+- Add `--mount HOST_DIR:CONTAINER_DIR`, replacing `--environment-kwarg mounts=[...]`. `--agent-kwarg` is now record-only; replay always uses the recorded agent options.
+- The smoke command uses `examples/smoke-task` directly.
+- Exempt loopback model traffic from an ambient HTTP proxy, merging `NO_PROXY`, `no_proxy`, and the child overlay without dropping existing entries.
+- Create cassette and run directories with mode `0700` and document that cassettes contain the provider API key.
 - Run Harbor with `--yes` and closed child stdin so task environment templates cannot block on a hidden confirmation prompt.
 - Keep HTTP replay safety in the framework-independent addon and Harbor launch/result handling in the runner; no Harbor source changes.
-- Verify 62 behavior tests, stopped-upstream HTTP replay, legacy and streamed redirect refusal, and real Docker Harbor trials with host environment templates and an ambient proxy (zero proxy requests, matching artifacts, reward 1.0).
+- Verified in the colima VM with Harbor 0.24.0 and mitmproxy 12.2.3: old code 77 tests, new code 22 tests; old and new Docker smokes each pass (2 recorded requests, reward 1.0, 20-byte artifact, changed instruction fails with 9 HTTP 400 misses); the new code replays a cassette recorded by the old code and the old code replays a cassette recorded by the new code, both with reward 1.0 and byte-identical artifacts.
 
 ## 0.1.0
 
