@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Rewrite the README as a short overview and quick start; move the CLI reference, filesystem comparison guide, and design notes to `docs/`.
 - Rename the repository, distribution, and CLI to `agent-mitm-replay`, the Python package to `agent_mitm_replay`, and addon options to `amr_*`.
 - Reject agent and LLM option names that Harbor would strip into a rerouting option, such as `api_base `.
 - Validate every configured `[[steps]]` result: step exceptions, missing or unexpected steps, and sub-threshold step rewards fail the run.
