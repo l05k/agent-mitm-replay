@@ -1,50 +1,53 @@
 # Comparing filesystems
 
-The main use case: record one trial on filesystem A, then replay the same model responses on filesystem B, and compare how the task behaves.
+Measure the effect of a task-data filesystem on Harbor end-to-end completion time while replaying a fixed sequence of model responses. The Agent still runs through Harbor; this is not a separate shell-script or syscall replay engine.
 
-## Bind mounts
+## One-time acceptance, then measurements
 
-Create a separate, freshly initialized host directory for each filesystem and mount each one at the same container path. The example assumes the task's workspace is `/app`. Copy all task inputs into each host directory before running.
+1. Prepare a fixed task/image and record one successful trial.
+2. Restore initial task data and run `validate` once. It checks task success, response consumption, and command-trajectory equality, then writes the acceptance marker. Exclude this warm-up/acceptance run from performance samples.
+3. Before each measured `replay`, restore the same initial data to the selected NAS. The tool only mounts it; it never copies, resets, or formats data.
+4. Keep the container mount paths and runtime configuration fixed. Change only the host directories that select the tested filesystem.
 
 ```bash
+# Prepare /mnt/reference/task-a with the task's initial inputs before recording.
 uv run agent-mitm-replay record \
   --task /path/to/task --cassette cassettes/task-a \
   --model openai/gpt-4o-mini --upstream https://api.openai.com \
-  --mount /mnt/fs-a/task-a:/app
+  --mount /mnt/reference/task-a:/app
 
+# Restore /mnt/reference/task-a before acceptance.
+uv run agent-mitm-replay validate \
+  --task /path/to/task --cassette cassettes/task-a \
+  --mount /mnt/reference/task-a:/app
+
+# Restore initial inputs on NAS A before every measured invocation.
 uv run agent-mitm-replay replay \
   --task /path/to/task --cassette cassettes/task-a \
-  --mount /mnt/fs-b/task-a:/app
+  --mount /mnt/nas-a/task-a:/app
+
+# Restore the same inputs on NAS B before every measured invocation.
+uv run agent-mitm-replay replay \
+  --task /path/to/task --cassette cassettes/task-a \
+  --mount /mnt/nas-b/task-a:/app
 ```
 
-Mounts are not stored in the cassette, so each replay names its own. The tool does not format disks or reset existing files. Preparing each directory is up to you.
+An empty bind mount hides the image's existing task files. Populate it from the same initial task state, including hidden files such as `.git`, permissions, and links.
 
-## Compose overlays
+## What belongs on the NAS
 
-When mounts are not enough, pass Compose overlay files through to Harbor:
+Mount all task data/work directories, for example `/app` and `/data`. Keep the system image, Harbor installation, cassette, proxy/Harbor logs, and unrelated caches on local storage. Container files outside the selected mounts are not part of the tested filesystem. On another machine, host mount sources must exist on the Docker daemon host.
 
-```bash
---environment-kwarg 'extra_docker_compose=["/absolute/overlay.yaml"]'
-```
+Bake tools and dependencies into the image and prepare it before measurements; avoid timed image builds and downloads. Pin the same image and Harbor/Agent versions. Store run outputs on local storage. Environment kwargs and copied Compose overlays come from the cassette; host mounts remain per-run inputs. Self-contained overlays avoid machine-specific external paths.
 
-## Keep everything else fixed
+## What the result means
 
-Replay matches requests exactly, so anything that changes what the agent sees changes the next model request and causes a miss. Keep these the same between runs:
+`elapsed_sec` measures Harbor startup through exit, including Agent work, verifier, and cleanup. Stage durations are also reported. Only replay runs are performance samples; record and validation involve different work.
 
-- container image
-- task inputs
-- working directory
-- agent options
-- locale
-- shell prompt
+The verifier still executes in measured runs and contributes I/O/time, but its reward is not rechecked. There is no per-run command comparison, syscall tracing, or workload certification. A successful one-time validation is assumed to transfer to the tested NAS configurations. Changing task/image or execution conditions can invalidate that assumption.
 
-This is strict request replay, not playback of recorded actions. If filesystem B produces different terminal output, the agent's next request differs from the recording and replay fails. That failure is a useful result: the [audit file](usage.md#reading-the-audit-file) shows the turn where the filesystem change first affected the agent.
+The proxy serves response N for request N, so different hostnames, timestamps, commit hashes, or terminal output no longer cause request-matching failures. This does **not** guarantee the same filesystem operations: shell branches, interactive programs, background work, or timing races can still change execution.
 
-## Timing
+Recorded command durations remain fixed waits, not completion signals. A slow NAS can therefore change whether output or a foreground command has finished before the next keystrokes arrive. This tool deliberately does not patch Harbor to wait for command completion; do not describe the experiment as exact syscall replay or a closed-loop adaptive Agent benchmark.
 
-Record and replay have very different model latency: replayed responses return almost instantly. So:
-
-- compare filesystem variants against each other in replay mode, not a record run against a replay run;
-- measure tool and filesystem time separately from model wait time.
-
-Instant replay can also change when background shell commands finish relative to the agent's next step, which can change terminal output.
+Validation is not a cache-control mechanism. State whether measurements use warm/cold client and NAS caches, keep that policy consistent across filesystems, and repeat measured runs. Input restoration itself may warm caches; it is outside the reported timer but still part of the experimental setup.

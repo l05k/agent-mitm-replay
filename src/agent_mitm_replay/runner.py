@@ -1,11 +1,13 @@
-"""Run one Harbor Terminus-2 trial behind the record/replay proxy."""
+"""Record a Harbor trace, validate it once, then measure offline replay runs."""
 
 from __future__ import annotations
 
+from datetime import datetime
 import importlib.metadata
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import socket
 import subprocess
@@ -80,13 +82,13 @@ def check_proxy_audit(path: Path, mode: str) -> dict:
         raise ReplayError(f"Proxy saw {summary['misses']} miss(es) and {summary['errors']} error(s): {path}")
     if summary["total"] < 1:
         raise ReplayError(f"No model responses recorded or loaded: {path}")
-    if mode == "replay" and summary["remaining"]:
+    if mode == "validate" and summary["remaining"]:
         raise ReplayError(f"{summary['remaining']} recorded response(s) were never requested: {path}")
     return summary
 
 
-def check_harbor_result(job: Path, minimum_reward: float) -> dict:
-    """Harbor can exit 0 after a failed trial, so read its result files instead."""
+def check_harbor_result(job: Path, minimum_reward: float | None) -> dict:
+    """Always reject trial exceptions; only record and validate inspect rewards."""
     trials = list(job.glob("*/result.json"))
     if len(trials) != 1:
         raise ReplayError(f"Expected one trial result in {job}, found {len(trials)}")
@@ -95,10 +97,32 @@ def check_harbor_result(job: Path, minimum_reward: float) -> dict:
         raise ReplayError(f"Harbor trial exception: {trials[0]}")
     if trial.get("step_results") is not None:
         raise ReplayError(f"Multi-step ([[steps]]) tasks are not supported: {trials[0]}")
-    rewards = (trial.get("verifier_result") or {}).get("rewards") or {}
-    if not rewards or not all(value >= minimum_reward for value in rewards.values()):
-        raise ReplayError(f"Rewards {rewards} are below {minimum_reward}: {trials[0]}")
-    return {"rewards": rewards, "trial_dir": str(trials[0].parent)}
+    phases = {}
+    for name in ("environment_setup", "agent_setup", "agent_execution", "verifier"):
+        phase = trial.get(name) or {}
+        if phase.get("started_at") and phase.get("finished_at"):
+            phases[name] = (datetime.fromisoformat(phase["finished_at"])
+                            - datetime.fromisoformat(phase["started_at"])).total_seconds()
+    result = {"trial_dir": str(trials[0].parent), "phase_seconds": phases}
+    if minimum_reward is not None:
+        rewards = (trial.get("verifier_result") or {}).get("rewards") or {}
+        if not rewards or not all(value >= minimum_reward for value in rewards.values()):
+            raise ReplayError(f"Rewards {rewards} are below {minimum_reward}: {trials[0]}")
+        result["rewards"] = rewards
+    return result
+
+
+def command_trace(trial_dir: Path) -> list:
+    """Preserve command batches and arguments, excluding generated tool-call IDs."""
+    trajectory = _read_json(trial_dir / "agent" / "trajectory.json")
+    commands = [
+        [{"function_name": call["function_name"], "arguments": call["arguments"]}
+         for call in step["tool_calls"]]
+        for step in trajectory["steps"] if step.get("tool_calls")
+    ]
+    if not commands:
+        raise ReplayError(f"No tool calls in command trajectory: {trial_dir}")
+    return commands
 
 
 def run_trial(
@@ -114,29 +138,52 @@ def run_trial(
     mounts: list[tuple[str, str]] | None = None,
     extra_instructions: list[str] | None = None,
     artifacts: list[str] | None = None,
-    minimum_reward: float = 1.0,
+    minimum_reward: float | None = None,
     env: dict[str, str] | None = None,
 ) -> dict:
-    """Record or replay one trial. Replay reuses model and agent options from the manifest."""
+    """Record, validate once, then measure without rechecking rewards or commands."""
+    if mode not in {"record", "validate", "replay"}:
+        raise ReplayError(f"Unknown mode: {mode}")
+    checked = mode != "replay"
+    validation = cassette / "validation.json"
     if mode == "record":
         if not model or not upstream:
             raise ReplayError("record requires --model and --upstream")
-        # Summarization adds model calls that depend on timing; a fixed session_id
-        # keeps the request bodies identical between record and replay.
         options = {"enable_summarize": False, "record_terminal_session": False,
                    **(agent_kwargs or {}), "session_id": f"amr-{uuid.uuid4().hex}"}
         artifacts, extra_instructions = list(artifacts or []), list(extra_instructions or [])
+        minimum_reward = 1.0 if minimum_reward is None else minimum_reward
         cassette.mkdir(parents=True, mode=0o700, exist_ok=False)
+        shutil.copyfile(task / "task.toml", cassette / "task.toml")
+        environment_options = dict(environment_kwargs or {})
+        if "extra_docker_compose" in environment_options:
+            overlays = []
+            (cassette / "environment").mkdir(mode=0o700)
+            for index, path in enumerate(environment_options["extra_docker_compose"]):
+                relative = f"environment/{index}.yaml"
+                shutil.copyfile(path, cassette / relative)
+                overlays.append(relative)
+            environment_options["extra_docker_compose"] = overlays
     else:
         manifest = _read_json(cassette / "manifest.json")
+        if manifest["schema_version"] != 2:
+            raise ReplayError("Record a new cassette for the record/validate/replay workflow")
+        if mode == "replay" and not validation.is_file():
+            raise ReplayError("Run validate once before replay: the trace is not validated")
+        if mode == "validate" and validation.exists():
+            raise ReplayError("Trace already validated; use replay for measurements")
         model, upstream, options = manifest["model"], manifest["upstream"], manifest["agent_kwargs"]
-        if artifacts is None:
-            artifacts = manifest["artifacts"]
-        if extra_instructions is None:
-            extra_instructions = manifest["extra_instructions"]
+        artifacts, extra_instructions = manifest["artifacts"], manifest["extra_instructions"]
+        environment_options = manifest["environment_kwargs"]
+        if mode == "validate" and minimum_reward is None:
+            minimum_reward = manifest["minimum_reward"]
     upstream = upstream.rstrip("/")
+    proxy_mode = "record" if mode == "record" else "replay"
     flows = (cassette / "flows.mitm").resolve()
-    output = (output or (cassette / "record" if mode == "record" else cassette / "replays" / uuid.uuid4().hex)).resolve()
+    default_output = cassette / ("record" if mode == "record" else "validation")
+    if mode == "replay":
+        default_output = cassette / "replays" / uuid.uuid4().hex
+    output = (output or default_output).resolve()
     output.mkdir(parents=True, mode=0o700, exist_ok=False)
     audit = output / "proxy-audit.jsonl"
     port = _free_port()
@@ -144,10 +191,9 @@ def run_trial(
     proxy_command = [
         str(bin_dir / "mitmdump"), "-q", "--mode", f"reverse:{upstream}",
         "--listen-host", "127.0.0.1", "--listen-port", str(port),
-        # lazy: never dial the provider unless a request is actually forwarded.
         "--set", "connection_strategy=lazy", "--set", f"confdir={output / 'mitm-config'}",
         "-s", str(Path(__file__).with_name("addon.py")),
-        "--set", f"amr_mode={mode}", "--set", f"amr_flows={flows}", "--set", f"amr_audit={audit}",
+        "--set", f"amr_mode={proxy_mode}", "--set", f"amr_flows={flows}", "--set", f"amr_audit={audit}",
     ]
     if mode == "record":
         proxy_command += ["-w", str(flows), "--set", "stream_large_bodies=1", "--set", "store_streamed_bodies=true"]
@@ -162,10 +208,10 @@ def run_trial(
     if mounts:
         binds = [{"type": "bind", "source": str(Path(source).resolve()), "target": target} for source, target in mounts]
         harbor_command += ["--mounts", json.dumps(binds)]
-    for key, value in (environment_kwargs or {}).items():
+    for key, value in environment_options.items():
         if key == "extra_docker_compose":
             for path in value:
-                harbor_command += ["--extra-docker-compose", str(path)]
+                harbor_command += ["--extra-docker-compose", str((cassette / path).resolve())]
         else:
             harbor_command += ["--environment-kwarg", f"{key}={json.dumps(value)}"]
     for instruction in extra_instructions:
@@ -173,7 +219,7 @@ def run_trial(
     for artifact in artifacts:
         harbor_command += ["--artifact", artifact]
     environment = child_env(env)
-    if mode == "replay":
+    if mode != "record":
         environment["OPENAI_API_KEY"] = "offline-replay-placeholder"
     _write_json(output / "command.json", {"argv": harbor_command})
     print(f"{mode}: {output}", flush=True)
@@ -183,8 +229,10 @@ def run_trial(
         harbor = None
         try:
             _wait_listening(proxy, port)
+            started = time.perf_counter()
             harbor = subprocess.Popen(harbor_command, stdout=harbor_log, **spawn)
             harbor_exit = harbor.wait()
+            elapsed = time.perf_counter() - started
         finally:
             if harbor is not None:
                 _stop(harbor)
@@ -192,16 +240,27 @@ def run_trial(
     proxy_summary = check_proxy_audit(audit, mode)
     if harbor_exit != 0:
         raise ReplayError(f"Harbor failed with exit {harbor_exit}; inspect {output / 'harbor.log'}")
-    result = check_harbor_result(output / "jobs" / "trial", minimum_reward)
-    summary = {"mode": mode, "model_requests": proxy_summary["total"], "reward": min(result["rewards"].values()),
-               "rewards": result["rewards"], "output": str(output), "trial_dir": result["trial_dir"]}
+    result = check_harbor_result(output / "jobs" / "trial", minimum_reward if checked else None)
+    if checked:
+        commands = command_trace(Path(result["trial_dir"]))
+        if mode == "validate" and commands != json.loads((cassette / "commands.json").read_text()):
+            raise ReplayError(f"Command trajectory differs from recording: {result['trial_dir']}")
+    summary = {"mode": mode, "checked": checked, "measured": mode == "replay", "elapsed_sec": elapsed,
+               "model_requests": proxy_summary["requests"], "output": str(output), **result}
+    if checked:
+        summary["reward"] = min(result["rewards"].values())
     _write_json(output / "summary.json", summary)
     if mode == "record":
+        _write_json(cassette / "commands.json", commands)
         _write_json(cassette / "manifest.json", {
-            "schema_version": 1, "model": model, "upstream": upstream, "agent_kwargs": options,
+            "schema_version": 2, "model": model, "upstream": upstream, "agent_kwargs": options,
+            "environment_kwargs": environment_options, "minimum_reward": minimum_reward,
             "artifacts": artifacts, "extra_instructions": extra_instructions,
             "harbor_version": importlib.metadata.version("harbor"),
             "mitmproxy_version": importlib.metadata.version("mitmproxy"),
             "model_requests": proxy_summary["total"],
         })
+    elif mode == "validate":
+        _write_json(validation, {"output": str(output), "reward": summary["reward"],
+                                 "minimum_reward": minimum_reward})
     return summary
