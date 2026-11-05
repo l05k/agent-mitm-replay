@@ -13,10 +13,16 @@ def _key_value(value: str) -> tuple[str, object]:
     if not separator or not key:
         raise argparse.ArgumentTypeError("Expected KEY=VALUE")
     try:
-        parsed = json.loads(raw)
+        return key, json.loads(raw)
     except ValueError:
-        parsed = raw
-    return key, parsed
+        return key, raw
+
+
+def _mount(value: str) -> tuple[str, str]:
+    source, separator, target = value.partition(":")
+    if not separator or not source or not target.startswith("/"):
+        raise argparse.ArgumentTypeError("Expected HOST_DIR:/container/path")
+    return source, target
 
 
 def main() -> int:
@@ -28,33 +34,34 @@ def main() -> int:
         command.add_argument("--cassette", type=Path, required=True)
         command.add_argument("--output", type=Path)
         command.add_argument("--minimum-reward", type=float, default=1.0)
-        command.add_argument("--agent-kwarg", action="append", type=_key_value, default=[], metavar="KEY=VALUE")
+        command.add_argument("--mount", action="append", type=_mount, default=[], metavar="HOST_DIR:CONTAINER_DIR",
+                             help="Bind-mount a host directory into the task container")
         command.add_argument("--environment-kwarg", action="append", type=_key_value, default=[], metavar="KEY=VALUE")
         command.add_argument("--extra-instruction", action="append")
         command.add_argument("--artifact", action="append")
         if mode == "record":
             command.add_argument("--model", required=True, help="LiteLLM model name, e.g. openai/gpt-4o-mini")
             command.add_argument("--upstream", required=True, help="Provider origin, e.g. https://api.openai.com")
-    smoke = subcommands.add_parser("smoke", help="Run a real Docker Harbor trial with a local scripted model")
+            command.add_argument("--agent-kwarg", action="append", type=_key_value, default=[], metavar="KEY=VALUE")
+    smoke = subcommands.add_parser("smoke", help="Record and replay the example task in Docker with a scripted model")
     smoke.add_argument("--output", type=Path, default=Path("smoke-output"))
-    smoke.add_argument("--image", help="Existing image with bash, tmux and C.UTF-8 (skip Dockerfile build)")
     args = parser.parse_args()
     try:
         if args.mode == "smoke":
             from .smoke import run_smoke
-            result = run_smoke(args.output, image=args.image)
+            result = run_smoke(args.output)
         else:
             result = run_trial(
                 args.mode, task=args.task, cassette=args.cassette,
                 model=getattr(args, "model", None), upstream=getattr(args, "upstream", None),
-                output=args.output, agent_kwargs=dict(args.agent_kwarg),
-                environment_kwargs=dict(args.environment_kwarg),
+                output=args.output, agent_kwargs=dict(getattr(args, "agent_kwarg", [])),
+                environment_kwargs=dict(args.environment_kwarg), mounts=args.mount,
                 extra_instructions=args.extra_instruction, artifacts=args.artifact,
                 minimum_reward=args.minimum_reward,
             )
         print(json.dumps(result, indent=2))
         return 0
-    except (ReplayError, OSError, ValueError) as error:
+    except (ReplayError, OSError, ValueError, KeyError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

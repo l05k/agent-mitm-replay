@@ -77,9 +77,9 @@ Replay needs no API key. Model, agent options, artifacts, and extra instructions
 
 | Document | Contents |
 | --- | --- |
-| [Usage](docs/usage.md) | CLI options, cassette layout, success criteria, divergence testing, smoke test |
+| [Usage](docs/usage.md) | CLI options, cassette layout, success criteria, audit file, divergence testing, smoke test |
 | [Comparing filesystems](docs/filesystem-comparison.md) | Replaying one recording against different mounts or Compose overlays |
-| [Design and limitations](docs/design.md) | Request matching, safety checks, network isolation limits, architecture |
+| [Design and limitations](docs/design.md) | Architecture, request matching, limitations |
 | [Changelog](CHANGELOG.md) | Release notes |
 
 ## Development

@@ -4,6 +4,7 @@
 - [Record](#record)
 - [Replay](#replay)
 - [When a run passes](#when-a-run-passes)
+- [Reading the audit file](#reading-the-audit-file)
 - [Testing divergence](#testing-divergence)
 - [Smoke test](#smoke-test)
 
@@ -12,19 +13,19 @@
 ```text
 agent-mitm-replay record --task DIR --cassette DIR --model MODEL --upstream ORIGIN [options]
 agent-mitm-replay replay --task DIR --cassette DIR [options]
-agent-mitm-replay smoke  [--output DIR] [--image IMAGE]
+agent-mitm-replay smoke  [--output DIR]
 ```
 
 Options shared by `record` and `replay`:
 
 | Option | Meaning |
 | --- | --- |
-| `--task DIR` | Harbor task directory. |
+| `--task DIR` | Harbor task directory. Single-step tasks only; a trial with `[[steps]]` results fails. |
 | `--cassette DIR` | Cassette directory. `record` creates it and fails if it already exists. |
 | `--output DIR` | Where to write logs and Harbor jobs. Defaults to `CASSETTE/record` for record and `CASSETTE/replays/<random id>` for replay. Must not exist. |
 | `--minimum-reward N` | Lowest verifier reward that counts as a pass. Default `1.0`. |
-| `--agent-kwarg KEY=VALUE` | Passed to Harbor's agent. `VALUE` is parsed as JSON when possible, otherwise used as a string. Repeatable. |
-| `--environment-kwarg KEY=VALUE` | Passed to Harbor's environment. `mounts` and `extra_docker_compose` map to Harbor's `--mounts` and `--extra-docker-compose`. Repeatable. |
+| `--mount HOST_DIR:CONTAINER_DIR` | Bind-mount a host directory into the task container. Not stored in the cassette, so replay can use a different one. Repeatable. |
+| `--environment-kwarg KEY=VALUE` | Passed to Harbor's environment. `extra_docker_compose=[...]` maps to Harbor's `--extra-docker-compose`. `VALUE` is parsed as JSON when possible. Repeatable. |
 | `--extra-instruction TEXT` | Extra instruction appended to the task. Repeatable. |
 | `--artifact PATH` | Container path that Harbor collects after the trial. Repeatable. |
 
@@ -32,8 +33,9 @@ Options for `record` only:
 
 | Option | Meaning |
 | --- | --- |
-| `--model MODEL` | LiteLLM model name, which must start with `openai/`, e.g. `openai/gpt-4o-mini`. |
-| `--upstream ORIGIN` | Provider origin, e.g. `https://api.openai.com`. |
+| `--model MODEL` | LiteLLM model name for an OpenAI-compatible API, e.g. `openai/gpt-4o-mini`. |
+| `--upstream ORIGIN` | Provider origin, e.g. `https://api.openai.com`. No `/v1` or other path. |
+| `--agent-kwarg KEY=VALUE` | Passed to Terminus-2, e.g. `temperature=0`. Stored in the cassette and reused by replay. Repeatable. |
 
 On success the command prints a JSON summary (mode, number of model requests, rewards, output paths) and exits 0. On failure it prints `error: ...` and exits 1.
 
@@ -49,21 +51,9 @@ uv run agent-mitm-replay record \
   --artifact /app/result.txt
 ```
 
-### Choosing `--upstream`
+The runner sets `api_base` to the local proxy and a fixed `session_id`, and turns off Terminus-2 summarization so the request bodies stay identical between record and replay. Do not pass your own `api_base` or `base_url`: model traffic would bypass the proxy and never be recorded.
 
-Give the origin only (scheme, host, optional port), without `/v1` or credentials. LiteLLM appends the API path itself.
-
-Use the provider's final endpoint. If the provider answers with a redirect (HTTP 301, 302, 303, 307, or 308 with a `Location` header, including relative ones), the proxy replaces it with HTTP 400 `unsafe_redirect`. Otherwise the model client could follow the redirect to an address outside the proxy, and that request would never be recorded.
-
-### Agent options
-
-The runner sets `api_base` and `session_id` itself. Options that would send model traffic around the proxy are rejected before any process starts, in `--agent-kwarg` as well as inside `llm_kwargs` and `llm_call_kwargs`:
-
-`api_base`, `base_url`, `client`, `custom_llm_provider`, `model_list`, `fallbacks`, `model`
-
-Only the `litellm` backend is supported. Normal generation parameters such as temperature stay configurable.
-
-Option names must not be empty or have leading or trailing whitespace. Harbor strips whitespace from names, so `api_base ` would otherwise slip past the check and still reroute traffic.
+The runner passes `--yes` to Harbor and closes child stdin, so a task's host environment templates are confirmed automatically.
 
 ### Cassette layout
 
@@ -82,10 +72,6 @@ cassettes/task-a/
 
 Each replay run writes the same kind of output under `cassettes/task-a/replays/<id>/` unless you pass `--output`.
 
-### Non-interactive runs
-
-The runner passes `--yes` to Harbor and closes child stdin, so nothing can wait on a hidden prompt. Host environment templates in the task are confirmed automatically. Missing required variables still fail Harbor's validation.
-
 ## Replay
 
 ```bash
@@ -94,27 +80,36 @@ uv run agent-mitm-replay replay \
   --cassette cassettes/task-a
 ```
 
-Replay reads `manifest.json` and reuses the recorded model, upstream, and agent options. Artifacts and extra instructions are also taken from the manifest unless you pass `--artifact` or `--extra-instruction`. Any `--agent-kwarg` you pass must equal the recorded value. Recorded options go through the same routing checks as new ones.
+Replay reads `manifest.json` and reuses the recorded model, upstream, and agent options. Artifacts and extra instructions also come from the manifest unless you pass `--artifact` or `--extra-instruction`. Mounts do not: pass `--mount` for the filesystem you want to test.
 
-Stop or disconnect the provider before replaying if you want to prove the run is offline. The runner:
-
-- starts mitmproxy with no upstream fallback;
-- sets a placeholder `OPENAI_API_KEY`;
-- sets `LITELLM_LOCAL_MODEL_COST_MAP=True`, so LiteLLM does not download its model price map;
-- adds `127.0.0.1`, `localhost`, and `::1` to both `NO_PROXY` and `no_proxy`, so an ambient HTTP proxy cannot reroute the local model hop. Existing exclusions and other proxy settings are kept.
-
-Cassettes that contain redirect responses are rejected during replay too.
+Replay needs no API key and never contacts the provider. The runner sets a placeholder `OPENAI_API_KEY`, sets `LITELLM_LOCAL_MODEL_COST_MAP=True` so LiteLLM does not download its price map, and adds `127.0.0.1,localhost` to `NO_PROXY` so an ambient HTTP proxy cannot intercept the local model hop.
 
 ## When a run passes
 
-The runner reads Harbor's persisted `result.json` files instead of trusting Harbor's exit code, because Harbor can exit 0 when a trial errored. A run passes only if:
+The runner reads Harbor's trial `result.json` instead of trusting Harbor's exit code, because Harbor can exit 0 when a trial errored. A run passes only if:
 
-- the proxy reported no errors;
-- in replay, every recorded response was used exactly once, with no misses;
-- Harbor reports exactly one trial, with no exception;
+- the proxy saw no misses and no transport errors;
+- in replay, every recorded response was used;
+- Harbor wrote exactly one trial result, with no exception;
 - every verifier reward is at least `--minimum-reward`.
 
-For a task with `[[steps]]`, every configured step must report a verifier result that meets the threshold. A step exception, a missing step, or an extra step fails the run.
+## Reading the audit file
+
+Every run writes `proxy-audit.jsonl`: one line per model call, then a summary.
+
+```json
+{"event": "response", "turn": 1, "request_sha256": "9f2c..."}
+{"event": "summary", "matched": 0, "misses": 0, "remaining": 0, "total": 2, "requests": 2, "errors": 0}
+```
+
+| `event` | Meaning |
+| --- | --- |
+| `response` | Record: the provider answered this call and it was saved. |
+| `hit` | Replay: an unused recording had exactly this request, and its response was returned. |
+| `miss` | Replay: no unused recording matched; the agent got HTTP 400 and the trial fails. |
+| `error` | The call failed in transit. |
+
+`turn` counts model calls from 1. Compare the record and replay audits line by line: the first turn whose `request_sha256` differs, or whose event is `miss`, is where the agent's behavior diverged.
 
 ## Testing divergence
 
@@ -127,7 +122,7 @@ uv run agent-mitm-replay replay \
   --extra-instruction 'Change the task so the recorded request must miss.'
 ```
 
-This should fail with a `ReplayError`, after Harbor records a trial that ended in `BadRequestError`. In real experiments, a miss like this means the new environment changed what the agent saw and therefore what it asked the model.
+This must fail. The audit shows a `miss` at turn 1, because the first request already contains the changed instruction.
 
 ## Smoke test
 
@@ -135,12 +130,11 @@ This should fail with a `ReplayError`, after Harbor records a trial that ended i
 uv run agent-mitm-replay smoke --output smoke-output
 ```
 
-The smoke test runs a real Harbor Terminus-2 trial in Docker against a scripted local OpenAI-compatible server, so it uses no provider tokens. It records through mitmproxy, stops the fake server, and replays offline. It checks that:
+The smoke test copies `examples/smoke-task`, records it against a scripted local model server (no provider tokens), shuts the server down, and replays offline. It checks that:
 
-- the recorded run gets reward `1.0`;
-- replay runs with the model server stopped;
-- replay produces the same `/app/result.txt` bytes;
-- the model server receives no requests during replay;
-- changing the instruction causes a replay miss.
+- the record run serves exactly the two scripted model calls and gets reward `1.0`;
+- replay passes with the model server gone, using every recorded response;
+- record and replay both write the same 20 bytes to `/app/result.txt`;
+- replay with a changed instruction fails with a `miss`.
 
-By default it builds the example task image from Docker Hub's `ubuntu:24.04`, which needs network access. To skip the build, pass `--image` with a local image that has `bash`, `tmux`, and the `C.UTF-8` locale.
+It builds the task image from `ubuntu:24.04` and installs `tmux` with apt, so Docker needs network access for the first build.

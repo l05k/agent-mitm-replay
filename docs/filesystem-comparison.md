@@ -4,20 +4,20 @@ The main use case: record one trial on filesystem A, then replay the same model 
 
 ## Bind mounts
 
-Create a separate, freshly initialized host directory for each filesystem and bind each one to the same container path. The example assumes the task's workspace is `/app`. Copy all task inputs into each host directory before running.
+Create a separate, freshly initialized host directory for each filesystem and mount each one at the same container path. The example assumes the task's workspace is `/app`. Copy all task inputs into each host directory before running.
 
 ```bash
 uv run agent-mitm-replay record \
   --task /path/to/task --cassette cassettes/task-a \
   --model openai/gpt-4o-mini --upstream https://api.openai.com \
-  --environment-kwarg 'mounts=[{"type":"bind","source":"/mnt/fs-a/task-a","target":"/app"}]'
+  --mount /mnt/fs-a/task-a:/app
 
 uv run agent-mitm-replay replay \
   --task /path/to/task --cassette cassettes/task-a \
-  --environment-kwarg 'mounts=[{"type":"bind","source":"/mnt/fs-b/task-a","target":"/app"}]'
+  --mount /mnt/fs-b/task-a:/app
 ```
 
-The tool does not format disks or reset existing files. Preparing each directory is up to you.
+Mounts are not stored in the cassette, so each replay names its own. The tool does not format disks or reset existing files. Preparing each directory is up to you.
 
 ## Compose overlays
 
@@ -38,7 +38,7 @@ Replay matches requests exactly, so anything that changes what the agent sees ch
 - locale
 - shell prompt
 
-This is strict request replay, not playback of recorded actions. If filesystem B produces different terminal output, the agent's next request differs from the recording and replay fails. That failure is a useful result: it tells you the filesystem change affected the agent's trajectory.
+This is strict request replay, not playback of recorded actions. If filesystem B produces different terminal output, the agent's next request differs from the recording and replay fails. That failure is a useful result: the [audit file](usage.md#reading-the-audit-file) shows the turn where the filesystem change first affected the agent.
 
 ## Timing
 
