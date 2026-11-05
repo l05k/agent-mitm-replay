@@ -1,15 +1,16 @@
 # agent-mitm-replay
 
-Record an agent's model calls once, then replay them offline on every later run.
+Record an agent's model calls, validate the trace once, then measure offline replays.
 
 `agent-mitm-replay` puts a [mitmproxy](https://mitmproxy.org/) reverse proxy between the agent and the model provider. It currently drives [Harbor](https://github.com/harbor-framework/harbor) Terminus-2 trials.
 
 - **record**: requests go to the real provider; the responses are saved to a cassette.
-- **replay**: the proxy answers from the cassette and does not forward requests to the provider.
+- **validate**: replay offline once; require task success, full response consumption, and the same command trajectory, then mark the cassette accepted.
+- **replay**: measure Harbor completion time using an accepted cassette, without repeating command or reward validation.
 
-Use it when you want to change the task environment (filesystem, mounts, image setup) while keeping model sampling fixed. The task, container, terminal commands, verifier, and filesystem all run for real on every run. Only the model responses come from the cassette.
+Use it to compare task-data filesystems/NAS mounts under a fixed model-response sequence. The task, container, terminal commands, verifier, and filesystem run for real each time. The verifier still contributes work and time during measurements, but its reward is not rechecked.
 
-Replay is strict. If the agent sends a request that is not in the cassette, the proxy returns HTTP 400 and the run fails. It never falls back to the provider. A recorded redirect is refused the same way, so the model client cannot follow it out of the proxy. This holds as long as the agent sends its model calls to the proxy; see [Design and limitations](docs/design.md#limitations).
+The proxy returns response N for model call N, even when terminal output or the prompt differs. It never falls back to the provider; exhaustion and recorded redirects get HTTP 400. This assumes all model calls go through the proxy; see [Design and limitations](docs/design.md).
 
 ```mermaid
 flowchart LR
@@ -44,7 +45,7 @@ uv sync --locked
 uv run agent-mitm-replay smoke --output smoke-output
 ```
 
-The smoke test uses a scripted local model server, so it costs no tokens. It still runs a real Harbor trial in Docker, records it, stops the fake model server, and replays offline. See [Smoke test](docs/usage.md#smoke-test) for what it checks.
+The smoke test uses a scripted local model server, so it costs no tokens. It records, stops the provider, validates once, then measures a real Harbor Docker replay. It also proves that a measured run can execute its verifier with reward zero without repeating acceptance. See [Smoke test](docs/usage.md#smoke-test).
 
 ### 2. Record a trial
 
@@ -60,15 +61,30 @@ uv run agent-mitm-replay record \
 
 `--upstream` is an origin only, with no `/v1` or other path. Recording fails unless the trial completes without errors and reaches a reward of at least `1.0`.
 
-### 3. Replay it offline
+### 3. Validate once
+
+Restore the task's initial data before this run. The tool does not reset mounted directories.
+
+```bash
+uv run agent-mitm-replay validate \
+  --task /path/to/task --cassette cassettes/task-a
+```
+
+This writes `cassettes/task-a/validation.json` only after task and command-trajectory checks pass. Treat validation as acceptance/warm-up, not a performance sample.
+
+### 4. Measure offline replays
+
+Restore the same initial data before every measurement, then select the filesystem through its host mount:
 
 ```bash
 uv run agent-mitm-replay replay \
-  --task /path/to/task \
-  --cassette cassettes/task-a
+  --task /path/to/task --cassette cassettes/task-a \
+  --mount /mnt/nas-a/task-a:/app
 ```
 
-Replay needs no API key. Model, agent options, artifacts, and extra instructions are restored from the cassette. Replay passes only when every recorded response is used exactly once and the verifier reward meets the threshold.
+Replay requires the acceptance marker and no API key. Agent/environment settings and copied Compose overlays come from the cassette; host mounts remain per-run inputs. The JSON summary reports `elapsed_sec` for Harbor startup through exit, including the verifier, and stage timings. It has `checked: false`, `measured: true`, and no reward fields. Basic execution errors still fail the run. Compare replay against replay, not recording against replay.
+
+One accepted trace is not a guarantee of equal filesystem operations on every NAS: timing and shell behavior can still differ. This research workflow assumes acceptance transfers to later runs and deliberately performs no per-measurement workload checks.
 
 > [!WARNING]
 > A cassette contains prompts, terminal output, file contents, model responses, and the full request headers, including the provider API key (`Authorization: Bearer ...`). Treat it as a secret and do not commit or share it unless your project allows that and you have removed the key. See [SECURITY.md](SECURITY.md).
@@ -77,9 +93,9 @@ Replay needs no API key. Model, agent options, artifacts, and extra instructions
 
 | Document | Contents |
 | --- | --- |
-| [Usage](docs/usage.md) | CLI options, cassette layout, success criteria, audit file, divergence testing, smoke test |
+| [Usage](docs/usage.md) | CLI options, one-time validation, timing boundaries, cassette layout, smoke test |
 | [Comparing filesystems](docs/filesystem-comparison.md) | Replaying one recording against different mounts or Compose overlays |
-| [Design and limitations](docs/design.md) | Architecture, request matching, limitations |
+| [Design and limitations](docs/design.md) | Architecture, response sequencing, experimental assumptions |
 | [Changelog](CHANGELOG.md) | Release notes |
 
 ## Development

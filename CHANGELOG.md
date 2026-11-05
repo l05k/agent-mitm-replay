@@ -2,17 +2,15 @@
 
 ## Unreleased
 
-- Rewrite the README as a short overview and quick start; move the CLI reference, filesystem comparison guide, and design notes to `docs/`.
-- Rename the repository, distribution, and CLI to `agent-mitm-replay`, the Python package to `agent_mitm_replay`, and addon options to `amr_*`.
-- Simplify to research-code scope: the addon matches with mitmproxy's `ServerPlayback` and writes one audit line per model call (`response`, `hit`, `miss`, `error` with `turn` and `request_sha256`) plus a summary. Routing-option and padded-name checks, multi-step result validation, and the smoke `--image` option are removed; multi-step trials now fail the run.
-- Redirects (3xx with `Location`) fail the run: replay answers a recorded redirect with HTTP 400 `unsafe_redirect` so the client cannot follow it to the provider, and recording counts one as an error.
-- Add `--mount HOST_DIR:CONTAINER_DIR`, replacing `--environment-kwarg mounts=[...]`. `--agent-kwarg` is now record-only; replay always uses the recorded agent options.
-- The smoke command uses `examples/smoke-task` directly.
-- Exempt loopback model traffic from an ambient HTTP proxy, merging `NO_PROXY`, `no_proxy`, and the child overlay without dropping existing entries.
-- Create cassette and run directories with mode `0700` and document that cassettes contain the provider API key.
-- Run Harbor with `--yes` and closed child stdin so task environment templates cannot block on a hidden confirmation prompt.
-- Keep HTTP replay safety in the framework-independent addon and Harbor launch/result handling in the runner; no Harbor source changes.
-- Verified in the colima VM with Harbor 0.24.0 and mitmproxy 12.2.3: old code 77 tests, new code 22 tests; old and new Docker smokes each pass (2 recorded requests, reward 1.0, 20-byte artifact, changed instruction fails with 9 HTTP 400 misses); the new code replays a cassette recorded by the old code and the old code replays a cassette recorded by the new code, both with reward 1.0 and byte-identical artifacts.
+- Replace exact HTTP request matching with a single FIFO response sequence. Prompt and terminal-output differences no longer cause misses; exhaustion and recorded redirects still fail without provider fallback.
+- Add `validate`: replay once offline, require task success, complete response consumption, and identical ordered command batches/arguments, then write `validation.json`.
+- Require the acceptance marker for measured `replay`. Keep running the verifier, but do not repeat command, reward, or remaining-response validation. Basic process/trial exceptions and proxy errors still fail.
+- Report `elapsed_sec` around Harbor startup through exit (including verifier and teardown) plus Harbor stage durations. Only replay summaries are `measured: true`; they omit reward fields.
+- Save environment kwargs, copied Compose overlays, the reward threshold, task metadata, and `commands.json` in schema-2 cassettes. Host mounts and data restoration stay caller-managed. Schema-1 cassettes require a fresh recording.
+- Make environment options, extra instructions, and artifacts record-only so later phases reuse the saved experiment settings. Preserve local proxy routing, `--yes`, closed child stdin, and private cassette/run directories.
+- Update the token-free Docker smoke to exercise recording, pre-validation gating, offline validation with a changed prompt, restored Compose settings, and a measured replay whose verifier returns zero. Remove strict-divergence checks and per-request hashing.
+- Document NAS data initialization, timing/cache assumptions, one-time acceptance limitations, and the distinction between fixed model responses and exact filesystem-operation replay.
+- Verified in colima with Harbor 0.24.0: 34 behavior tests pass; the three-trial Docker smoke passes offline validation and measured replay with a zero-reward verifier and identical 20-byte artifacts. Separate real trials reject changed commands and a failed validation reward without writing an acceptance marker.
 
 ## 0.1.0
 
