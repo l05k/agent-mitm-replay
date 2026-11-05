@@ -7,13 +7,14 @@ import pytest
 from agent_mitm_replay.runner import (
     ReplayError,
     _child_env,
+    _task_step_names,
     check_harbor_result,
     check_proxy_audit,
     run_trial,
 )
 
 
-def make_job(tmp_path, *, exception=None, reward=1.0, errors=0, finished=True):
+def make_job(tmp_path, *, exception=None, reward=1.0, errors=0, finished=True, steps=None):
     job = tmp_path / "job"
     trial = job / "trial"
     trial.mkdir(parents=True)
@@ -25,8 +26,17 @@ def make_job(tmp_path, *, exception=None, reward=1.0, errors=0, finished=True):
     (trial / "result.json").write_text(json.dumps({
         "exception_info": exception,
         "verifier_result": {"rewards": {"reward": reward}},
+        "step_results": steps,
     }))
     return job
+
+
+def step(name, *, reward=1.0, exception=None):
+    return {
+        "step_name": name,
+        "exception_info": exception,
+        "verifier_result": None if reward is None else {"rewards": {"reward": reward}},
+    }
 
 
 @pytest.mark.parametrize("changes", [
@@ -47,6 +57,51 @@ def test_reward_threshold_is_inclusive(tmp_path):
     assert check_harbor_result(job, 0.5)["rewards"] == {"reward": 0.5}
     with pytest.raises(ReplayError):
         check_harbor_result(job, 1.0)
+
+
+def test_multi_step_result_must_verify_every_configured_step(tmp_path):
+    steps = [step("prepare"), step("solve")]
+    job = make_job(tmp_path, steps=steps)
+    assert check_harbor_result(job, 1.0, expected_steps=["prepare", "solve"])["rewards"] == {
+        "reward": 1.0
+    }
+
+
+@pytest.mark.parametrize("steps", [
+    [step("prepare"), step("solve", exception={"exception_type": "RuntimeError"})],
+    [step("prepare"), step("solve", reward=None)],
+    [step("prepare"), step("solve", reward=0.0)],
+    [step("prepare")],
+    [step("prepare"), step("other")],
+])
+def test_multi_step_result_rejects_failed_missing_or_low_scoring_step(tmp_path, steps):
+    job = make_job(tmp_path, steps=steps)
+    with pytest.raises(ReplayError):
+        check_harbor_result(job, 1.0, expected_steps=["prepare", "solve"])
+
+
+def test_single_step_task_rejects_unexpected_step_results(tmp_path):
+    job = make_job(tmp_path, steps=[step("prepare")])
+    with pytest.raises(ReplayError):
+        check_harbor_result(job, 1.0)
+
+
+def test_single_step_task_rejects_missing_step_results_for_multi_step_config(tmp_path):
+    job = make_job(tmp_path)
+    with pytest.raises(ReplayError):
+        check_harbor_result(job, 1.0, expected_steps=["prepare", "solve"])
+
+
+def test_task_step_names_reads_configured_steps(tmp_path):
+    task = make_task(tmp_path)
+    assert _task_step_names(task) is None
+    (task / "task.toml").write_text(
+        '[[steps]]\nname = "prepare"\n\n[[steps]]\nname = "solve"\n'
+    )
+    assert _task_step_names(task) == ["prepare", "solve"]
+    (task / "task.toml").write_text("steps = []\n")
+    with pytest.raises(ReplayError):
+        _task_step_names(task)
 
 
 @pytest.mark.parametrize("changes", [
@@ -117,6 +172,36 @@ def test_record_refuses_caller_session_id(tmp_path):
             agent_kwargs={"session_id": "attacker"},
         )
     assert not cassette.exists()
+
+
+@pytest.mark.parametrize("agent_kwargs", [
+    {"api_base ": "http://attacker.example/v1"},
+    {" llm_backend": "tinker"},
+    {"llm_kwargs": {"api_base ": "http://attacker.example/v1"}},
+    {"llm_call_kwargs": {" base_url": "http://attacker.example/v1"}},
+])
+def test_record_refuses_padded_option_names_before_side_effects(tmp_path, agent_kwargs):
+    task, cassette = make_task(tmp_path), tmp_path / "cassette"
+    with pytest.raises(ReplayError, match="empty or padded option names"):
+        run_trial(
+            "record", task=task, cassette=cassette,
+            model="openai/gpt-4o-mini", upstream="http://127.0.0.1:8080",
+            agent_kwargs=agent_kwargs,
+        )
+    assert not cassette.exists()
+
+
+@pytest.mark.parametrize("agent_kwargs", [
+    {"api_base ": "http://attacker.example/v1"},
+    {"llm_kwargs": {"base_url ": "http://attacker.example/v1"}},
+])
+def test_replay_refuses_padded_manifest_option_names(tmp_path, agent_kwargs):
+    task, cassette = make_task(tmp_path), make_cassette(
+        tmp_path, agent_kwargs={"session_id": "amr-recorded", **agent_kwargs}
+    )
+    with pytest.raises(ReplayError, match="empty or padded option names"):
+        run_trial("replay", task=task, cassette=cassette)
+    assert not (cassette / "replays").exists()
 
 
 @pytest.mark.parametrize("manifest", [

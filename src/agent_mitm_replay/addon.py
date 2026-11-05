@@ -252,6 +252,14 @@ class ReplayAddon:
             broken.append("server_replay_nopop")
         if ctx.options.server_replay_ignore_content:
             broken.append("server_replay_ignore_content")
+        if ctx.options.server_replay_ignore_host:
+            broken.append("server_replay_ignore_host")
+        if ctx.options.server_replay_ignore_port:
+            broken.append("server_replay_ignore_port")
+        if ctx.options.server_replay_ignore_params:
+            broken.append("server_replay_ignore_params")
+        if ctx.options.server_replay_ignore_payload_params:
+            broken.append("server_replay_ignore_payload_params")
         if getattr(ctx.options, "stream_large_bodies", None):
             broken.append("stream_large_bodies")
         if getattr(ctx.options, "connection_strategy", "lazy") != "lazy":
