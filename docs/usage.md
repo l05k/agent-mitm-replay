@@ -22,6 +22,16 @@ The lifecycle is **record → validate once → replay for measurements**. Recor
 
 `--minimum-reward N` is available for `record` and `validate` only. Record defaults to `1.0`; validate defaults to the threshold saved during recording. An override becomes the acceptance threshold and is saved as `minimum_reward` in `validation.json`.
 
+### Response latency (validate/replay)
+
+Recording measures each model call from the proxy receiving the complete request to receiving the complete response, including the full streamed body. The arithmetic mean is saved as `mean_response_latency_sec` in `manifest.json` and the recording summary.
+
+Both `validate` and `replay` wait this mean before returning **each** recorded response. They return the whole response after one asynchronous wait; original token/chunk timing and per-call latency variation are not reproduced. No delay is added during recording.
+
+Use `--response-delay-sec SECONDS` to override the wait for that invocation, e.g. `--response-delay-sec 2.5`. Values must be finite and non-negative; `0` disables waiting. Omitting the option always uses the recorded mean, not a previous invocation's override. Misses and refused redirects return errors without the simulated wait.
+
+Every run summary reports `response_delay_sec` (zero during recording). The wait contributes to `elapsed_sec` and Harbor agent-execution time. Keep the delay identical across filesystem comparisons; it can also affect background command progress.
+
 ### Record-only options
 
 | Option | Meaning |
@@ -56,7 +66,7 @@ The runner sets a local proxy `api_base`, a stable `session_id`, and disables su
 ```text
 cassettes/task-a/
 ├── flows.mitm          # model requests and responses; contains credentials
-├── manifest.json       # schema 2: model, agent/environment settings, threshold
+├── manifest.json       # schema 3: model, settings, threshold, mean response latency
 ├── task.toml           # task metadata snapshot, including image/workdir if configured
 ├── commands.json       # recorded command batches used for one-time validation
 ├── environment/        # copied Compose overlays, when supplied
@@ -66,7 +76,7 @@ cassettes/task-a/
 └── replays/<id>/       # measured-run logs, Harbor jobs, summary.json
 ```
 
-The task directory and image still come from `--task`; the metadata snapshot is not an image or task-data backup. Old schema-1 cassettes must be recorded again; there is no migration shim.
+The task directory and image still come from `--task`; the metadata snapshot is not an image or task-data backup. Schema-1/2 cassettes must be recorded again; there is no migration shim.
 
 ## Validate once
 
@@ -106,6 +116,7 @@ A measured summary includes:
 - `checked: false`, `measured: true`;
 - `elapsed_sec`: monotonic wall time from starting the Harbor child until it exits, including verifier, environment setup/cleanup, and Harbor's own output work;
 - `phase_seconds`: Harbor's environment setup, agent setup/execution, and verifier durations, when present;
+- `response_delay_sec`: fixed simulated wait before each model response, including zero when disabled;
 - `model_requests`, `output`, and `trial_dir`.
 
 Measured summaries omit `reward` and `rewards`. Record/validate summaries have `checked: true`, `measured: false` and include rewards. Proxy startup/shutdown, runner post-processing, and caller-managed input restoration are outside `elapsed_sec`.
@@ -122,6 +133,8 @@ Every run writes events and final counters to `proxy-audit.jsonl`:
 ```
 
 `response` means a provider response was recorded; `hit` means the next recorded response was served, **not** that prompts matched. `miss` means the response sequence was exhausted (local HTTP 400). `error` means a transport failure or refused redirect. Counters remain useful for diagnostics, but only validation requires complete consumption.
+
+The recording's final audit summary also includes `mean_response_latency_sec`, measured across provider responses. Failed recordings do not produce a usable cassette.
 
 ## Smoke test
 

@@ -5,6 +5,7 @@ Options, set by ``runner.py`` with ``--set``:
 ``amr_mode``   ``record`` or ``replay``.
 ``amr_flows``  The recorded ``flows.mitm`` (replay only; recording uses ``-w``).
 ``amr_audit``  JSONL file with one line per model call and a final summary.
+``amr_response_delay_sec``  Fixed wait before each replayed response, in seconds.
 
 Replay is a fixed response sequence: the first request gets the first recorded
 response, the second the second, and so on. Method, URL and body are irrelevant;
@@ -23,6 +24,7 @@ Audit lines: ``{"event": "response"|"hit"|"miss"|"error", "turn": n}``, then
 "errors"}``. ``remaining`` counts recorded responses that were never served.
 """
 
+import asyncio
 import json
 from collections import deque
 
@@ -44,11 +46,13 @@ class ReplayAddon:
         self.recorded: deque[http.Response] = deque()
         self.audit = None
         self.requests = self.matched = self.misses = self.errors = self.total = 0
+        self.latency_total_sec = 0.0
 
     def load(self, loader) -> None:
         loader.add_option("amr_mode", str, "record", "record or replay", choices=["record", "replay"])
         loader.add_option("amr_flows", str, "", "Recorded flows.mitm to replay")
         loader.add_option("amr_audit", str, "", "JSONL audit file")
+        loader.add_option("amr_response_delay_sec", str, "0", "Fixed replay response delay in seconds")
 
     def configure(self, updated) -> None:
         if "amr_audit" in updated and ctx.options.amr_audit:
@@ -72,7 +76,7 @@ class ReplayAddon:
             self.audit.write(json.dumps(record) + "\n")
             self.audit.flush()
 
-    def request(self, flow: http.HTTPFlow) -> None:
+    async def request(self, flow: http.HTTPFlow) -> None:
         self.requests += 1
         if not self._replaying():
             return
@@ -89,6 +93,9 @@ class ReplayAddon:
             flow.response = _error_response("unsafe_redirect", "the cassette holds a redirect; refusing to serve it")
             self._log("error")
             return
+        delay = float(ctx.options.amr_response_delay_sec)
+        if delay > 0:
+            await asyncio.sleep(delay)
         flow.response = recorded.copy()
         flow.is_replay = "response"
         self.matched += 1
@@ -103,6 +110,7 @@ class ReplayAddon:
             self.errors += 1
             self._log("error")
             return
+        self.latency_total_sec += flow.response.timestamp_end - flow.request.timestamp_end
         self._log("response")
 
     def error(self, flow: http.HTTPFlow) -> None:
@@ -114,6 +122,8 @@ class ReplayAddon:
             "event": "summary", "matched": self.matched, "misses": self.misses,
             "remaining": len(self.recorded) if self._replaying() else 0,
             "total": self.total, "requests": self.requests, "errors": self.errors,
+            **({"mean_response_latency_sec": self.latency_total_sec / self.total if self.total else 0.0}
+               if not self._replaying() else {}),
         })
         if self.audit is not None:
             self.audit.close()

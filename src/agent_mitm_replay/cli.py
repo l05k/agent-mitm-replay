@@ -42,6 +42,9 @@ def main() -> int:
             command.add_argument("--model", required=True, help="LiteLLM model name, e.g. openai/gpt-4o-mini")
             command.add_argument("--upstream", required=True, help="Provider origin, e.g. https://api.openai.com")
             command.add_argument("--agent-kwarg", action="append", type=_key_value, default=[], metavar="KEY=VALUE")
+        else:
+            command.add_argument("--response-delay-sec", type=float, metavar="SECONDS",
+                                 help="Fixed wait per model response; default: recorded mean; 0 disables waiting")
         if mode != "replay":
             command.add_argument("--minimum-reward", type=float)
     smoke = subcommands.add_parser("smoke", help="Record, validate, and measure a Docker trial with a scripted model")
@@ -59,6 +62,7 @@ def main() -> int:
                 environment_kwargs=dict(getattr(args, "environment_kwarg", [])), mounts=args.mount,
                 extra_instructions=getattr(args, "extra_instruction", None), artifacts=getattr(args, "artifact", None),
                 minimum_reward=getattr(args, "minimum_reward", None),
+                response_delay_sec=getattr(args, "response_delay_sec", None),
             )
         print(json.dumps(result, indent=2))
         return 0

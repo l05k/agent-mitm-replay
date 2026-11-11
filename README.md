@@ -88,6 +88,8 @@ uv run agent-mitm-replay replay \
 
 Replay requires the acceptance marker and no API key. Agent/environment settings and copied Compose overlays come from the cassette; host mounts remain per-run inputs. The JSON summary reports `elapsed_sec` for Harbor startup through exit, including the verifier, and stage timings. It has `checked: false`, `measured: true`, and no reward fields. Basic execution errors still fail the run. Compare replay against replay, not recording against replay.
 
+Recording saves the mean model-response latency (complete request to complete response). Both validate and replay wait this mean before each response. Override it per run with `--response-delay-sec 2.5`, or use `0` for immediate responses. Summaries report the effective `response_delay_sec`; streaming/token timing is not simulated. Existing schema-1/2 cassettes must be recorded again.
+
 One accepted trace is not a guarantee of equal filesystem operations on every NAS: timing and shell behavior can still differ. This research workflow assumes acceptance transfers to later runs and deliberately performs no per-measurement workload checks.
 
 > [!WARNING]

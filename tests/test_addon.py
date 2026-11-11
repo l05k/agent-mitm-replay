@@ -6,6 +6,7 @@ Replay serves the cassette as a fixed sequence, so every test asserts what the
 client receives, in order.
 """
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -54,7 +55,7 @@ def replay(addon, tmp_path, recorded: list[http.HTTPFlow], requests: list[http.H
         tctx.configure(addon, amr_mode="replay", amr_flows=str(flows_path), amr_audit=str(audit))
         answered = []
         for f in requests:
-            addon.request(f)
+            asyncio.run(addon.request(f))
             addon.response(f)  # mitmproxy fires it for locally set responses too
             answered.append(f)
         addon.done()
@@ -116,13 +117,17 @@ def test_record_audits_one_line_per_model_call(tmp_path):
     addon = ReplayAddon()
     with taddons.context(addon) as tctx:
         tctx.configure(addon, amr_mode="record", amr_audit=str(audit))
-        for body in (BODY_A, BODY_B):
+        for body, latency in ((BODY_A, 1.0), (BODY_B, 3.0)):
             f = flow(body, "ok")
-            addon.request(f)
+            f.request.timestamp_start = 90.0
+            f.request.timestamp_end = 100.0
+            f.response.timestamp_start = 100.5
+            f.response.timestamp_end = 100.0 + latency
+            asyncio.run(addon.request(f))
             assert f.response.text == "ok"  # untouched: mitmproxy forwards it upstream
             addon.response(f)
         failed = request(BODY_A)
-        addon.request(failed)
+        asyncio.run(addon.request(failed))
         assert failed.response is None  # record never answers locally
         addon.error(failed)
         addon.done()
@@ -130,7 +135,7 @@ def test_record_audits_one_line_per_model_call(tmp_path):
     assert [(line["event"], line.get("turn")) for line in lines] == [
         ("response", 1), ("response", 2), ("error", 3), ("summary", None)]
     assert lines[-1] == {"event": "summary", "matched": 0, "misses": 0, "remaining": 0,
-                         "total": 2, "requests": 3, "errors": 1}
+                         "total": 2, "requests": 3, "errors": 1, "mean_response_latency_sec": 2.0}
 
 
 def test_record_fails_on_a_redirect(tmp_path):
@@ -139,9 +144,41 @@ def test_record_fails_on_a_redirect(tmp_path):
     with taddons.context(addon) as tctx:
         tctx.configure(addon, amr_mode="record", amr_audit=str(audit))
         for f in (redirect(BODY_A, 301), flow(BODY_B, "ok")):
-            addon.request(f)
+            asyncio.run(addon.request(f))
             addon.response(f)
         addon.done()
     lines = audit_lines(audit)
     assert [line["event"] for line in lines] == ["error", "response", "summary"]
     assert lines[-1]["errors"] == 1
+
+
+def test_replay_withholds_response_during_nonblocking_delay(tmp_path, monkeypatch):
+    async def scenario():
+        sleeping, release = asyncio.Event(), asyncio.Event()
+        original_sleep = asyncio.sleep
+
+        async def controlled_sleep(seconds):
+            assert seconds == 2.5
+            sleeping.set()
+            await release.wait()
+
+        monkeypatch.setattr(asyncio, "sleep", controlled_sleep)
+        addon = ReplayAddon()
+        path = cassette(tmp_path / "flows.mitm", [flow(BODY_A, "answer")])
+        with taddons.context(addon) as tctx:
+            tctx.configure(addon, amr_mode="replay", amr_flows=str(path), amr_response_delay_sec="2.5")
+            pending = request()
+            task = asyncio.create_task(addon.request(pending))
+            await sleeping.wait()
+            try:
+                assert pending.response is None
+                assert addon.matched == 0
+                # Other event-loop work can proceed while the response is withheld.
+                await original_sleep(0)
+            finally:
+                release.set()
+                await task
+            assert pending.response.text == "answer"
+            assert addon.matched == 1
+
+    asyncio.run(scenario())
