@@ -22,6 +22,8 @@ The Nth model call receives the Nth recorded response exactly once. Changes in b
 
 Only one serial trial may use a cassette. This sequence is not an intelligent retry/matching system: an extra model call consumes the next response. There is no request-text normalization or alternate strict mode.
 
+Recording computes the arithmetic mean of `response.timestamp_end - request.timestamp_end`: complete request received to complete response received, including streamed content. The schema-3 manifest saves `mean_response_latency_sec`. Validation and replay asynchronously wait that mean before serving each response, unless `--response-delay-sec` overrides it for the invocation (`0` disables waiting). Run summaries report the effective `response_delay_sec`; recording adds no wait.
+
 ## Experimental boundary
 
 A cassette represents a fixed model-response/command trajectory, not a general-purpose adaptive Agent. One successful validation is treated as acceptance for later measurements. The tool does not prove that future runs perform identical filesystem operations or produce correct task results.
@@ -35,8 +37,8 @@ The task directory and image are caller-managed. The manifest stores agent/envir
 - **Single-step tasks only.** Multi-step trial results are rejected.
 - **No command-completion patch.** Recorded `duration` waits remain unchanged. Slow storage can change foreground/background progress or terminal input handling, even with identical model responses.
 - **No per-measurement workload validation.** Commands, verifier rewards, and unused responses are not checked again. A measured result is not a new correctness certificate.
-- **No recorded model latency.** Replay returns response bytes immediately; original streaming timing is not reproduced. Compare replay runs with other replay runs.
+- **Average model latency only.** Offline responses arrive after one fixed wait. Per-call latency variation and original streaming/token timing are not reproduced. Keep the effective delay fixed across replay comparisons.
 - **No general network isolation.** Task commands/verifiers can still access the network; verifier model calls are outside this cassette. Disable or separately handle them for a controlled experiment.
 - **Do not bypass the proxy.** Custom `api_base` or `llm_kwargs.base_url` options can route model calls elsewhere. The runner does not police those overrides.
 - **Redirects fail.** Recording counts redirects with `Location` as errors and writes no manifest; offline operation refuses them before a client can follow them. Use the provider's final origin.
-- **Trusted, immutable experiment artifacts.** Schema-1 cassettes require a fresh recording. Editing an accepted cassette/task/image does not trigger revalidation; create a new cassette for a changed experiment.
+- **Trusted, immutable experiment artifacts.** Schema-1/2 cassettes require a fresh recording. Editing an accepted cassette/task/image does not trigger revalidation; create a new cassette for a changed experiment.

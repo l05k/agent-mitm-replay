@@ -44,6 +44,8 @@ Bake tools and dependencies into the image and prepare it before measurements; a
 
 `elapsed_sec` measures Harbor startup through exit, including Agent work, verifier, and cleanup. Stage durations are also reported. Only replay runs are performance samples; record and validation involve different work.
 
+Validation and replay default to the recording's mean model-response latency before every response. Keep `response_delay_sec` identical across compared runs; `--response-delay-sec SECONDS` overrides it (`0` disables waiting). This wait is included in the measured time and can let background commands progress; it does not reproduce original token timing or per-call latency variation.
+
 The verifier still executes in measured runs and contributes I/O/time, but its reward is not rechecked. There is no per-run command comparison, syscall tracing, or workload certification. A successful one-time validation is assumed to transfer to the tested NAS configurations. Changing task/image or execution conditions can invalidate that assumption.
 
 The proxy serves response N for request N, so different hostnames, timestamps, commit hashes, or terminal output no longer cause request-matching failures. This does **not** guarantee the same filesystem operations: shell branches, interactive programs, background work, or timing races can still change execution.

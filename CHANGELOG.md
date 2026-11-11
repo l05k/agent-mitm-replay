@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Save complete-request-to-complete-response mean model latency in schema-3 cassettes. Validate/replay asynchronously wait that mean before each response; `--response-delay-sec` overrides it per run, including zero to disable waiting. Report the effective delay in run summaries. Schema-1/2 cassettes require a fresh recording; token timing is not reproduced.
 - Replace exact HTTP request matching with a single FIFO response sequence. Prompt and terminal-output differences no longer cause misses; exhaustion and recorded redirects still fail without provider fallback.
 - Add `validate`: replay once offline, require task success, complete response consumption, and identical ordered command batches/arguments, then write `validation.json`.
 - Require the acceptance marker for measured `replay`. Keep running the verifier, but do not repeat command, reward, or remaining-response validation. Basic process/trial exceptions and proxy errors still fail.

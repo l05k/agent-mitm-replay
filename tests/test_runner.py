@@ -75,7 +75,7 @@ def test_measurement_still_rejects_trial_exceptions(tmp_path):
 def test_trace_lifecycle_gate_precedes_execution(tmp_path, validated, mode):
     cassette = tmp_path / "cassette"
     cassette.mkdir()
-    (cassette / "manifest.json").write_text(json.dumps({"schema_version": 2}))
+    (cassette / "manifest.json").write_text(json.dumps({"schema_version": 3}))
     if validated:
         (cassette / "validation.json").write_text("{}")
     output = tmp_path / "run"

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 import importlib.metadata
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -139,16 +140,23 @@ def run_trial(
     extra_instructions: list[str] | None = None,
     artifacts: list[str] | None = None,
     minimum_reward: float | None = None,
+    response_delay_sec: float | None = None,
     env: dict[str, str] | None = None,
 ) -> dict:
     """Record, validate once, then measure without rechecking rewards or commands."""
     if mode not in {"record", "validate", "replay"}:
         raise ReplayError(f"Unknown mode: {mode}")
+    if response_delay_sec is not None:
+        if mode == "record":
+            raise ReplayError("response_delay_sec is only available for validate/replay")
+        if not math.isfinite(response_delay_sec) or response_delay_sec < 0:
+            raise ReplayError("response_delay_sec must be finite and non-negative")
     checked = mode != "replay"
     validation = cassette / "validation.json"
     if mode == "record":
         if not model or not upstream:
             raise ReplayError("record requires --model and --upstream")
+        response_delay_sec = 0.0
         options = {"enable_summarize": False, "record_terminal_session": False,
                    **(agent_kwargs or {}), "session_id": f"amr-{uuid.uuid4().hex}"}
         artifacts, extra_instructions = list(artifacts or []), list(extra_instructions or [])
@@ -166,8 +174,8 @@ def run_trial(
             environment_options["extra_docker_compose"] = overlays
     else:
         manifest = _read_json(cassette / "manifest.json")
-        if manifest["schema_version"] != 2:
-            raise ReplayError("Record a new cassette for the record/validate/replay workflow")
+        if manifest["schema_version"] != 3:
+            raise ReplayError("Record a new cassette with mean response latency (schema 3)")
         if mode == "replay" and not validation.is_file():
             raise ReplayError("Run validate once before replay: the trace is not validated")
         if mode == "validate" and validation.exists():
@@ -175,6 +183,8 @@ def run_trial(
         model, upstream, options = manifest["model"], manifest["upstream"], manifest["agent_kwargs"]
         artifacts, extra_instructions = manifest["artifacts"], manifest["extra_instructions"]
         environment_options = manifest["environment_kwargs"]
+        if response_delay_sec is None:
+            response_delay_sec = manifest["mean_response_latency_sec"]
         if mode == "validate" and minimum_reward is None:
             minimum_reward = manifest["minimum_reward"]
     upstream = upstream.rstrip("/")
@@ -194,6 +204,7 @@ def run_trial(
         "--set", "connection_strategy=lazy", "--set", f"confdir={output / 'mitm-config'}",
         "-s", str(Path(__file__).with_name("addon.py")),
         "--set", f"amr_mode={proxy_mode}", "--set", f"amr_flows={flows}", "--set", f"amr_audit={audit}",
+        "--set", f"amr_response_delay_sec={response_delay_sec}",
     ]
     if mode == "record":
         proxy_command += ["-w", str(flows), "--set", "stream_large_bodies=1", "--set", "store_streamed_bodies=true"]
@@ -247,18 +258,22 @@ def run_trial(
             raise ReplayError(f"Command trajectory differs from recording: {result['trial_dir']}")
     summary = {"mode": mode, "checked": checked, "measured": mode == "replay", "elapsed_sec": elapsed,
                "model_requests": proxy_summary["requests"], "output": str(output), **result}
+    summary["response_delay_sec"] = response_delay_sec
+    if mode == "record":
+        summary["mean_response_latency_sec"] = proxy_summary["mean_response_latency_sec"]
     if checked:
         summary["reward"] = min(result["rewards"].values())
     _write_json(output / "summary.json", summary)
     if mode == "record":
         _write_json(cassette / "commands.json", commands)
         _write_json(cassette / "manifest.json", {
-            "schema_version": 2, "model": model, "upstream": upstream, "agent_kwargs": options,
+            "schema_version": 3, "model": model, "upstream": upstream, "agent_kwargs": options,
             "environment_kwargs": environment_options, "minimum_reward": minimum_reward,
             "artifacts": artifacts, "extra_instructions": extra_instructions,
             "harbor_version": importlib.metadata.version("harbor"),
             "mitmproxy_version": importlib.metadata.version("mitmproxy"),
             "model_requests": proxy_summary["total"],
+            "mean_response_latency_sec": proxy_summary["mean_response_latency_sec"],
         })
     elif mode == "validate":
         _write_json(validation, {"output": str(output), "reward": summary["reward"],
