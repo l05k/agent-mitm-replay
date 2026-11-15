@@ -1,32 +1,26 @@
-"""mitmproxy addon that records or replays model calls (``mitmdump -s addon.py``).
-
-Options, set by ``runner.py`` with ``--set``:
-
-``amr_mode``   ``record`` or ``replay``.
-``amr_flows``  The recorded ``flows.mitm`` (replay only; recording uses ``-w``).
-``amr_audit``  JSONL file with one line per model call and a final summary.
-
-Replay is a fixed response sequence: the first request gets the first recorded
-response, the second the second, and so on. Method, URL and body are irrelevant;
-each recorded response is served once, in cassette order. A request after the
-last response is a *miss*: it gets a local HTTP 400 and never reaches the
-network.
-
-Redirects (3xx with ``Location``) count as errors, so the run fails. The
-recorded redirect is consumed and the client gets a local 400 instead, so it
-cannot follow the redirect to the provider. In record the redirect has already
-reached the client; the failed run writes no manifest, so that cassette cannot
-be replayed.
-
-Audit lines: ``{"event": "response"|"hit"|"miss"|"error", "turn": n}``, then
-``{"event": "summary", "matched", "misses", "remaining", "total", "requests",
-"errors"}``. ``remaining`` counts recorded responses that were never served.
-"""
+"""mitmproxy addon: replay model messages and collect Codex native OTLP logs."""
 
 import json
-from collections import deque
+import hmac
+import os
+from collections import defaultdict, deque
+from time import time_ns
 
 from mitmproxy import ctx, http, io
+
+from agent_mitm_replay.trace import codex_event, codex_log_records
+
+
+def request_key(request: http.Request) -> tuple:
+    """Match the model route and conversation structure, not generated text/IDs."""
+    if request.method != "POST":
+        return request.method, request.path
+    body = json.loads(request.get_text())
+    history = body.get("input", body.get("messages", []))
+    shape = tuple((item.get("role"), item.get("type"), item.get("name"),
+                   tuple(tool["function"]["name"] for tool in item.get("tool_calls", [])))
+                  for item in history) if isinstance(history, list) else ("text",)
+    return request.method, request.path, body["model"], bool(body.get("stream")), shape
 
 REDIRECTS = {301, 302, 303, 307, 308}
 
@@ -41,25 +35,31 @@ def _error_response(error_type: str, message: str) -> http.Response:
 
 class ReplayAddon:
     def __init__(self) -> None:
-        self.recorded: deque[http.Response] = deque()
-        self.audit = None
+        self.recorded = defaultdict(deque)
+        self.audit = self.telemetry = self.capture = None
         self.requests = self.matched = self.misses = self.errors = self.total = 0
+        self.telemetry_started = False
+        self.model_spans = []
 
     def load(self, loader) -> None:
         loader.add_option("amr_mode", str, "record", "record or replay", choices=["record", "replay"])
         loader.add_option("amr_flows", str, "", "Recorded flows.mitm to replay")
         loader.add_option("amr_audit", str, "", "JSONL audit file")
+        loader.add_option("amr_telemetry", str, "", "Codex OTLP log file")
+        loader.add_option("amr_model_path", str, "", "Exact POST route for model inference")
 
     def configure(self, updated) -> None:
         if "amr_audit" in updated and ctx.options.amr_audit:
             self.audit = open(ctx.options.amr_audit, "w", encoding="utf-8")
-        if "amr_flows" in updated and ctx.options.amr_mode == "replay":
-            flows = [
-                flow for flow in io.read_flows_from_paths([ctx.options.amr_flows])
-                if isinstance(flow, http.HTTPFlow) and flow.response is not None
-            ]
-            self.recorded = deque(flow.response for flow in flows)
-            self.total = len(self.recorded)
+        if "amr_telemetry" in updated and ctx.options.amr_telemetry:
+            self.telemetry = open(ctx.options.amr_telemetry, "w", encoding="utf-8")
+        if "amr_flows" in updated and ctx.options.amr_flows:
+            if not self._replaying():
+                self.capture = open(ctx.options.amr_flows, "wb")
+                return
+            for flow in io.read_flows_from_paths([ctx.options.amr_flows]):
+                self.recorded[request_key(flow.request)].append(flow.response)
+                self.total += 1
 
     def _replaying(self) -> bool:
         return ctx.options.amr_mode == "replay"
@@ -73,17 +73,41 @@ class ReplayAddon:
             self.audit.flush()
 
     def request(self, flow: http.HTTPFlow) -> None:
-        self.requests += 1
-        if not self._replaying():
+        token = os.getenv("AMR_TRIAL_TOKEN")
+        if token and not hmac.compare_digest(flow.request.headers.get("authorization", ""), f"Bearer {token}"):
+            flow.response = _error_response("unauthorized", "wrong trial token")
             return
-        if not self.recorded:
+        if self.telemetry is not None and flow.request.path == "/amr-logs":
+            if not self.telemetry_started:
+                self.telemetry.write('{"event": "otel"}\n')
+                self.telemetry_started = True
+            for record in codex_log_records(json.loads(flow.request.get_text())):
+                if (event := codex_event(record)) is not None:
+                    self.telemetry.write(json.dumps(event) + "\n")
+            self.telemetry.flush()
+            flow.response = http.Response.make(200, b"{}", {"content-type": "application/json"})
+            return
+        if flow.request.method != "POST" or flow.request.path != ctx.options.amr_model_path:
+            # Codex probes optional billing metadata even with analytics disabled.
+            # It is not inference and must not reach the provider or the cassette.
+            flow.response = http.Response.make(404)
+            return
+        self.requests += 1
+        flow.metadata["amr_start_ns"] = time_ns()
+        if not self._replaying():
+            if key := os.getenv("AMR_UPSTREAM_KEY"):
+                flow.request.headers["authorization"] = f"Bearer {key}"
+            return
+        try:
+            candidates = self.recorded.get(request_key(flow.request))
+        except (KeyError, TypeError, ValueError):
+            candidates = None
+        if not candidates:
             self.misses += 1
-            flow.response = _error_response(
-                "replay_miss", f"the cassette has no response left for {flow.request.method} {flow.request.url}"
-            )
+            flow.response = _error_response("replay_miss", "no recorded response for this model turn")
             self._log("miss")
             return
-        recorded = self.recorded.popleft()
+        recorded = candidates.popleft()
         if _is_redirect(recorded):
             self.errors += 1
             flow.response = _error_response("unsafe_redirect", "the cassette holds a redirect; refusing to serve it")
@@ -94,15 +118,26 @@ class ReplayAddon:
         self.matched += 1
         self._log("hit")
 
+    def responseheaders(self, flow: http.HTTPFlow) -> None:
+        if not self._replaying() and flow.response.headers.get("content-type", "").startswith("text/event-stream"):
+            flow.response.stream = True
+
     def response(self, flow: http.HTTPFlow) -> None:
+        if "amr_start_ns" not in flow.metadata:
+            return  # local telemetry, not a model exchange
+        self.model_spans.append([flow.metadata["amr_start_ns"], time_ns()])
         if self._replaying():
             return
         self.total += 1
-        if _is_redirect(flow.response):
-            # The client may already be following it; fail the recording so it is never replayed.
+        if _is_redirect(flow.response) or flow.response.status_code >= 400:
             self.errors += 1
-            self._log("error")
+            self._write({"event": "error", "turn": self.requests,
+                         "method": flow.request.method, "path": flow.request.path,
+                         "status": flow.response.status_code})
             return
+        if self.capture is not None:
+            flow.request.headers.pop("authorization", None)
+            io.FlowWriter(self.capture).add(flow)
         self._log("response")
 
     def error(self, flow: http.HTTPFlow) -> None:
@@ -112,11 +147,15 @@ class ReplayAddon:
     def done(self) -> None:
         self._write({
             "event": "summary", "matched": self.matched, "misses": self.misses,
-            "remaining": len(self.recorded) if self._replaying() else 0,
+            "remaining": self.total - self.matched if self._replaying() else 0,
             "total": self.total, "requests": self.requests, "errors": self.errors,
+            "model_spans": self.model_spans,
         })
         if self.audit is not None:
             self.audit.close()
             self.audit = None
+        for handle in (self.capture, self.telemetry):
+            if handle is not None:
+                handle.close()
 
 addons = [ReplayAddon()]

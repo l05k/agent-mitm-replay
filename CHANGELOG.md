@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Run pinned Codex and OpenClaw in prebuilt Harbor images. Compute tool wall
+  time from native events, separate from Harbor lifetime.
+- Capture task outcomes without filtering on reward. Check the model exchanges
+  and tool evidence on every replay; failed trials have no timing sample.
+- Add the native offline smoke and require schema-3 cassettes.
+- Verified the pinned native binaries in Colima: offline replay succeeds with
+  zero reward, changed tool output is rejected, and 11 behavior tests pass.
+
+## Previous snapshot
+
 - Replace exact HTTP request matching with a single FIFO response sequence. Prompt and terminal-output differences no longer cause misses; exhaustion and recorded redirects still fail without provider fallback.
 - Add `validate`: replay once offline, require task success, complete response consumption, and identical ordered command batches/arguments, then write `validation.json`.
 - Require the acceptance marker for measured `replay`. Keep running the verifier, but do not repeat command, reward, or remaining-response validation. Basic process/trial exceptions and proxy errors still fail.
