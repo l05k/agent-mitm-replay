@@ -57,3 +57,51 @@ def test_capture_injects_key_but_does_not_persist_it(tmp_path, monkeypatch):
         addon.done()
     recorded, = io.read_flows_from_paths([str(cassette)])
     assert 'authorization' not in recorded.request.headers
+
+
+def test_responses_provider_failure_retains_diagnostic_without_a_cassette_turn(tmp_path):
+    addon = ReplayAddon()
+    cassette, audit = tmp_path / 'flows.mitm', tmp_path / 'audit.jsonl'
+    with taddons.context(addon) as settings:
+        settings.configure(addon, amr_mode='record', amr_flows=str(cassette),
+                           amr_audit=str(audit), amr_model_path='/v1/responses')
+        flow = model_flow(path='/v1/responses')
+        addon.request(flow)
+        flow.response = http.Response.make(500, json.dumps({'error': {
+            'message': 'not implemented', 'type': 'new_api_error', 'code': 'convert_request_failed'},
+            'unrelated': 'not part of the diagnostic'}).encode(), {'content-type': 'application/json'})
+        addon.response(flow)
+        addon.done()
+    events = [json.loads(line) for line in audit.read_text().splitlines()]
+    assert events[0]['status'] == 500 and events[0]['path'] == '/v1/responses'
+    assert events[0]['upstream_error'] == {
+        'message': 'not implemented', 'type': 'new_api_error', 'code': 'convert_request_failed'}
+    assert events[-1]['errors'] == 1
+    assert list(io.read_flows_from_paths([str(cassette)])) == []
+
+
+def test_websocket_upgrade_cannot_be_recorded_or_replayed(tmp_path):
+    addon = ReplayAddon()
+    cassette, audit = tmp_path / 'flows.mitm', tmp_path / 'audit.jsonl'
+    upgrade = model_flow(path='/v1/responses')
+    upgrade.response = http.Response.make(101, b'', {'connection': 'Upgrade', 'upgrade': 'websocket'})
+    with taddons.context(addon) as settings:
+        settings.configure(addon, amr_mode='record', amr_flows=str(cassette),
+                           amr_audit=str(audit), amr_model_path='/v1/responses')
+        addon.request(upgrade)
+        addon.response(upgrade)
+        addon.done()
+    assert json.loads(audit.read_text().splitlines()[-1])['errors'] == 1
+    assert list(io.read_flows_from_paths([str(cassette)])) == []
+    with cassette.open('wb') as file:
+        io.FlowWriter(file).add(upgrade)
+    addon = ReplayAddon()
+    with taddons.context(addon) as settings:
+        settings.configure(addon, amr_mode='replay', amr_flows=str(cassette),
+                           amr_audit=str(audit), amr_model_path='/v1/responses')
+        request = model_flow(path='/v1/responses')
+        addon.request(request)
+        assert request.response.status_code == 400
+        assert json.loads(request.response.get_text())['error']['type'] == 'unsupported_websocket'
+        assert 'upgrade' not in request.response.headers
+        addon.done()

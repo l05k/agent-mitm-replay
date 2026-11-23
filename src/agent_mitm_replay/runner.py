@@ -223,8 +223,17 @@ def run_trial(mode: str, *, task: Path, cassette: Path, agent: str | None = None
         seconds = tool_seconds(tools, proxy_summary["model_spans"])
     except (TrialFailure, TraceError) as error:
         status = error.status if isinstance(error, TrialFailure) else "error"
-        _write_json(output / "summary.json", {"mode": mode, "status": status, "error": str(error)})
-        raise
+        detail = str(error)
+        if audit.is_file():
+            for line in audit.read_text().splitlines():
+                event = json.loads(line)
+                if event.get("event") == "error" and "status" in event:
+                    upstream_error = event.get("upstream_error", {})
+                    detail += (f"; upstream {event['method']} {event['path']} HTTP {event['status']}"
+                               f": {json.dumps(upstream_error, ensure_ascii=False)}")
+                    break
+        _write_json(output / "summary.json", {"mode": mode, "status": status, "error": detail})
+        raise TrialFailure(status, detail) from error
 
     summary = {"mode": mode, "status": "ok", "agent": agent, "tool_s": seconds,
                "harbor_s": elapsed, "model_requests": proxy_summary["requests"],
