@@ -25,6 +25,30 @@ data directory. The container paths, task directory contents, and image must
 match capture. Prefer a prebuilt image by digest and keep unrelated caches and
 logs off the tested filesystem.
 
+### Diagnosing Codex provider failures
+
+Codex requires a working **Responses API** (`POST /v1/responses`, or the same
+route under the configured API prefix) with SSE streaming. A successful
+`/chat/completions` request does not prove Codex compatibility. This project
+does not translate between the two protocols or fall back to another provider.
+
+Failed runs include the model endpoint, HTTP status, and the upstream JSON
+error's `message`, `type`, and `code` in `proxy-audit.jsonl` and `summary.json`.
+The CLI also includes that diagnostic instead of showing only Harbor's generic
+agent-exit error. Failed exchanges are not saved as replayable cassette turns.
+Provider messages can contain request details; treat run diagnostics as private.
+
+For example, on lyh228 the supplied gateway's `deepseek-v4.1-flash` returned
+HTTP 200 for Chat Completions but HTTP 500 with `convert_request_failed` /
+`not implemented` for Responses. This is a recording/provider compatibility
+failure, not an offline replay miss. Use a Responses-capable upstream for Codex;
+Chat-Completions-only models can be used with OpenClaw instead.
+
+TLS verification stays enabled by default. Any temporary insecure relay used
+for diagnosing an expired certificate is external to the runner and must not
+be mistaken for a project-wide certificate bypass.
+
+
 `--output DIRECTORY` must be new. Defaults are `CASSETTE/record` and
 `CASSETTE/replays/<id>`. A complete capture has `manifest.json`, `flows.mitm`,
 and `tools.json`. Migrate older cassettes by recapturing. Every run writes

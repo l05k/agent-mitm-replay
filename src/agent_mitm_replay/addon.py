@@ -108,9 +108,10 @@ class ReplayAddon:
             self._log("miss")
             return
         recorded = candidates.popleft()
-        if _is_redirect(recorded):
+        if _is_redirect(recorded) or recorded.status_code == 101:
             self.errors += 1
-            flow.response = _error_response("unsafe_redirect", "the cassette holds a redirect; refusing to serve it")
+            kind = "unsafe_redirect" if _is_redirect(recorded) else "unsupported_websocket"
+            flow.response = _error_response(kind, "the cassette holds a redirect or WebSocket upgrade")
             self._log("error")
             return
         flow.response = recorded.copy()
@@ -129,11 +130,20 @@ class ReplayAddon:
         if self._replaying():
             return
         self.total += 1
-        if _is_redirect(flow.response) or flow.response.status_code >= 400:
+        if _is_redirect(flow.response) or flow.response.status_code == 101 or flow.response.status_code >= 400:
             self.errors += 1
+            detail = {}
+            if flow.response.headers.get("content-type", "").startswith("application/json"):
+                try:
+                    error = json.loads(flow.response.get_text()).get("error")
+                    if isinstance(error, dict):
+                        detail = {key: str(error[key])[:1000] for key in ("message", "type", "code")
+                                  if key in error}
+                except (ValueError, AttributeError):
+                    pass  # Preserve the HTTP failure even if its body is malformed.
             self._write({"event": "error", "turn": self.requests,
                          "method": flow.request.method, "path": flow.request.path,
-                         "status": flow.response.status_code})
+                         "status": flow.response.status_code, "upstream_error": detail})
             return
         if self.capture is not None:
             flow.request.headers.pop("authorization", None)

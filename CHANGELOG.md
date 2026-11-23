@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Surface upstream model HTTP status and structured JSON error details in failed
+  trial summaries and CLI errors, including unsupported Responses conversions.
+- Reject WebSocket upgrades during recording and replay; an HTTP 101 handshake
+  is not a replayable Responses stream.
+- Document the distinction between Responses compatibility and a successful
+  Chat Completions call. Keep TLS verification enabled by default.
+- Verified on lyh228 with native Codex 0.169.0: two-turn scripted capture and
+  offline replay succeed, reward zero is retained, and changed tool output is
+  rejected. All 13 behavior tests pass. Real `deepseek-v4.1-flash` succeeds on
+  Chat Completions but its Responses request fails upstream with HTTP 500
+  `convert_request_failed`; that failure is now visible in the trial diagnostic.
+
 - Run pinned Codex and OpenClaw in prebuilt Harbor images. Compute tool wall
   time from native events, separate from Harbor lifetime.
 - Capture task outcomes without filtering on reward. Check the model exchanges
