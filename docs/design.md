@@ -1,34 +1,82 @@
 # Timing and validation
 
-Harbor launches Codex or OpenClaw without modifying their tool implementations.
-The bench adapter supplies a local model endpoint, the pinned agent version and
-native instrumentation: Codex OTLP tool-result events and OpenClaw tool hooks.
-Logs stay on the control disk. Workspace writes use native tool semantics; the
-runner does not inject an agent-step durability barrier.
+## Architecture
 
-The proxy stores successful HTTP model exchanges. In replay it matches method,
-route, model, streaming mode and conversation shape; it uses recorded order
-within each match key. Exact prompt bytes and generated transport IDs are not
-request keys. Unmatched or unused responses fail the trial. No offline request
-can fall back to the model provider. This is model-response replay, not an
-identical-syscall or adaptive-agent claim. Task networking remains independent;
-keep it fixed across runs.
+`record` and `replay` run one single-step Harbor task through `harbor run`. The
+runner passes `--agent codex|openclaw|pi`, a pinned `version` agent kwarg and
+the model endpoint through Harbor's `--agent-env`. Harbor installs and
+configures the CLI in the container, runs the agent, writes the agent logs and
+standard `agent/trajectory.json`, and runs the verifier. The only custom
+component in a measured trial is the local mitmproxy addon in front of the
+model endpoint.
 
-Tool intervals come from measured durations on the actual harness. We union
-intervals and remove proxy exchange time from delegation waits, without
-subtracting simultaneously executing concrete tools. Do not substitute the
-Harbor agent phase for `tool_s`: it also includes harness work outside tool
-execution. This metric ends with the harness call; detached jobs not awaited
-by it are not measured to background completion.
+The proxy accepts only the selected model route: `/v1/responses` for the
+default Codex, `/v1/chat/completions` for OpenClaw/Pi and explicitly selected
+historical Codex Chat mode, or the corresponding route under a custom prefix.
+The CLI version and wire API are recorded together and reused offline. There
+is no translation or automatic version fallback. Other requests, such as
+Codex billing metadata probes, receive a local 404 and do not reach the provider.
 
-Validation after every trial compares observed tool calls, arguments, explicit
-outcomes and model-visible output, removing known harness-generated framing
-such as Codex command timing. Different work or output yields divergence; no
-retry or permissive fallback. Missing native telemetry is an error. Verifier
-reward is reported and can be zero; an identical trajectory can fail to solve
-the task. Harbor infrastructure exceptions still invalidate the trial.
+## Model recording and replay
 
-Media, background tools and nondeterministic commands can yield unstable
-results. Report their observed divergence against the preselected denominator;
-do not select a replacement task after seeing timings. The adapters are pinned
-rather than claiming support for all versions or tool schemas.
+Recording forwards the request upstream with the host's provider bearer key
+and stores only successful HTTP model exchanges. The key never enters the
+container; the agent receives an ephemeral per-trial token. Saved flows have
+authorization removed. Replay has no provider credential.
+
+Replay matches method, route, model, streaming mode and conversation shape;
+recorded order is used within each match key. Exact prompt bytes and generated
+transport IDs are not request keys. An unmatched request or an unused recorded
+response fails the trial. No offline request can fall back to the provider:
+redirects and WebSocket upgrades are rejected. The project adds no protocol
+translation, provider fallback or retry; retry behavior built into Harbor, its
+installers and the agent CLIs is left in place.
+
+## Timing
+
+`agent_execution_s` is the duration of Harbor's `agent_execution` phase in the
+trial result. It includes the agent's model exchanges, tool execution and
+harness overhead. Do not describe it as native tool wall time, tool latency or
+model latency.
+
+`harbor_s` is wall-clock time around the Harbor subprocess. It includes
+environment setup, agent installation and configuration, agent execution, the
+verifier and teardown; treat it as diagnostic only. `phase_seconds` reports
+each Harbor phase that has start and finish timestamps. Accepted replays are
+compared on `agent_execution_s`, never on capture runs or `harbor_s`.
+
+Agent installation happens in Harbor's `agent_setup` phase, outside
+`agent_execution_s`. Configuration is not uniformly outside it: for example,
+Pi uploads its runtime configuration during agent execution. `agent_execution_s`
+therefore includes runtime setup and configuration performed by the agent, and
+`agent_setup` still needs the installer's network access.
+
+## Validation and failure
+
+Every trial must contain exactly one Harbor result with no infrastructure
+exception, a single-step task and a positive `agent_execution` phase. The proxy
+audit must show at least one model exchange, no errors and, on replay, full
+consumption of the recording.
+
+The standard `agent/trajectory.json` is compared in ordered batches by tool
+function name and arguments only. Observations, tool outputs and call IDs are
+not compared. Replay can therefore accept the same tool calls even when their
+outputs or filesystem effects differ; this is not an exact workload claim.
+Reward is reported but never gates a trial, and the same tool calls can still
+leave the task unsolved.
+
+A divergence is an unmatched or unused model response or a different
+tool-call trajectory. An error is a proxy or upstream failure, missing
+artifact or timing, or a Harbor exception; a Harbor timeout is reported as a
+timeout. Failures are fail-fast: the runner makes one Harbor trial attempt and
+adds no retry or permissive fallback. Retry behavior built into Harbor's
+installers or the agent CLIs is left unchanged. Setup errors such as a
+mismatched task or an unavailable Docker daemon abort the experiment before a
+timing sample exists.
+
+Media, background processes, network-dependent tools and nondeterministic
+commands can produce unstable trajectories or timings. Report observed
+divergence against the preselected denominator; do not select a replacement
+task after seeing timings. The pinned versions are specific, and Harbor's
+installer owns how they are installed. This project does not claim support for
+other agent versions, other protocols or identical task workloads.

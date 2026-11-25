@@ -2,8 +2,9 @@ import json
 
 import pytest
 
-from agent_mitm_replay.runner import TrialFailure, check_harbor_result, check_proxy_audit
-from agent_mitm_replay.trace import Tool, TraceError, read_codex, read_openclaw, signature, tool_seconds
+from agent_mitm_replay.runner import (
+    TrialFailure, check_harbor_result, check_proxy_audit, command_trace,
+)
 
 
 @pytest.mark.parametrize('changes', [{'remaining': 1}, {'misses': 1}, {'requests': 1}])
@@ -20,7 +21,10 @@ def test_unsolved_trial_is_distinct_from_timeout(tmp_path):
     trial = tmp_path / 'job' / 'trial'
     trial.mkdir(parents=True)
     result = trial / 'result.json'
-    result.write_text(json.dumps({'verifier_result': {'rewards': {'reward': 0.0}}}))
+    result.write_text(json.dumps({
+        'verifier_result': {'rewards': {'reward': 0.0}},
+        'agent_execution': {'started_at': '2026-11-25T00:00:00', 'finished_at': '2026-11-25T00:00:02'},
+    }))
     assert check_harbor_result(trial.parent)['rewards'] == {'reward': 0.0}
     result.write_text(json.dumps({'exception_info': {'exception_type': 'AgentTimeoutError'}}))
     with pytest.raises(TrialFailure) as failure:
@@ -28,30 +32,28 @@ def test_unsolved_trial_is_distinct_from_timeout(tmp_path):
     assert failure.value.status == 'timeout'
 
 
-def test_tool_time_unions_parallel_work_and_does_not_charge_model_wait():
-    ns = 10**9
-    spans = [Tool(0, 9 * ns, 'wait_agent', {}, None),
-             Tool(ns, 3 * ns, 'shell', {}, None),
-             Tool(7 * ns, 10 * ns, 'search', {}, None)]
-    assert tool_seconds(spans, [(2 * ns, 6 * ns), (5 * ns, 7 * ns)]) == 6
+def test_harbor_phase_time_is_reported_without_tool_timing(tmp_path):
+    trial = tmp_path / 'trial'
+    trial.mkdir()
+    (trial / 'result.json').write_text(json.dumps({
+        'agent_execution': {'started_at': '2026-11-25T00:00:00', 'finished_at': '2026-11-25T00:00:02.5'},
+    }))
+    assert check_harbor_result(tmp_path)['phase_seconds']['agent_execution'] == 2.5
 
 
-def test_codex_signature_ignores_latency_but_retains_output_and_exit_status(tmp_path):
-    log = tmp_path / 'tools.jsonl'
-    def trial(chunk, wall, code):
-        event = {'seq': 1, 'id': chunk, 'name': 'exec_command', 'namespace': '',
-                 'arguments': '{"cmd": "cat file"}', 'success': True, 'truncated': False,
-                 'start_ns': 0, 'end_ns': 9,
-                 'output': f'Chunk ID: {chunk}\nWall time: {wall} seconds\nProcess exited with code {code}\nOutput:\npayload'}
-        log.write_text('{"event": "otel"}\n' + json.dumps(event))
-        return signature(read_codex(log))
-    assert trial('a1', '0.02', 0) == trial('b2', '0.09', 0)
-    assert trial('a1', '0.02', 0) != trial('b2', '0.09', 1)
-
-
-def test_openclaw_requires_outcome_for_every_started_tool(tmp_path):
-    log = tmp_path / 'tools.jsonl'
-    log.write_text('\n'.join(map(json.dumps, [{'event': 'ready'},
-        {'event': 'start', 'id': 'call', 'run': 'run', 'name': 'read'}])))
-    with pytest.raises(TraceError, match='without all tool outcomes'):
-        read_openclaw(log)
+def test_command_trace_compares_harbor_calls_not_generated_ids_or_output(tmp_path):
+    agent = tmp_path / 'agent'
+    agent.mkdir()
+    trajectory = {'steps': [{'source': 'agent', 'tool_calls': [
+        {'tool_call_id': 'first-id', 'function_name': 'bash', 'arguments': {'command': 'cat input'}}],
+        'observation': {'results': [{'content': 'first output'}]}}]}
+    path = agent / 'trajectory.json'
+    path.write_text(json.dumps(trajectory))
+    recorded = command_trace(tmp_path)
+    trajectory['steps'][0]['tool_calls'][0]['tool_call_id'] = 'new-id'
+    trajectory['steps'][0]['observation']['results'][0]['content'] = 'other output'
+    path.write_text(json.dumps(trajectory))
+    assert command_trace(tmp_path) == recorded
+    trajectory['steps'][0]['tool_calls'][0]['arguments']['command'] = 'cat other-input'
+    path.write_text(json.dumps(trajectory))
+    assert command_trace(tmp_path) != recorded

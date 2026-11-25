@@ -2,25 +2,68 @@
 
 ## Unreleased
 
-- Surface upstream model HTTP status and structured JSON error details in failed
-  trial summaries and CLI errors, including unsupported Responses conversions.
-- Reject WebSocket upgrades during recording and replay; an HTTP 101 handshake
-  is not a replayable Responses stream.
-- Document the distinction between Responses compatibility and a successful
-  Chat Completions call. Keep TLS verification enabled by default.
-- Verified on lyh228 with native Codex 0.169.0: two-turn scripted capture and
-  offline replay succeed, reward zero is retained, and changed tool output is
-  rejected. All 13 behavior tests pass. Real `deepseek-v4.1-flash` succeeds on
-  Chat Completions but its Responses request fails upstream with HTTP 500
-  `convert_request_failed`; that failure is now visible in the trial diagnostic.
-
-- Run pinned Codex and OpenClaw in prebuilt Harbor images. Compute tool wall
-  time from native events, separate from Harbor lifetime.
-- Capture task outcomes without filtering on reward. Check the model exchanges
-  and tool evidence on every replay; failed trials have no timing sample.
-- Add the native offline smoke and require schema-3 cassettes.
-- Verified the pinned native binaries in Colima: offline replay succeeds with
-  zero reward, changed tool output is rejected, and 11 behavior tests pass.
+- Launch Harbor's built-in `codex`, `openclaw` and `pi` agents instead of
+  project-owned agent adapters and tool-timing plugins. Harbor owns in-container
+  agent installation, configuration, execution, logs and the verifier.
+- Pin Codex 0.169.0, OpenClaw 2026.7.1 and Pi 0.85.1 through Harbor agent
+  kwargs. Pi is configured with `model_api=openai-completions`; users keep the
+  same `--agent pi` CLI. Harbor installs Node 22 and the pinned CLI packages.
+- Keep only the HTTP model-response proxy: record successful exchanges and
+  replay them by method, route, model, streaming mode and conversation shape.
+  Add no provider fallback, protocol translation, redirect following or custom
+  retry; built-in Harbor and agent retry behavior is left unchanged.
+- Report `agent_execution_s` from Harbor's agent phase as the timing metric,
+  with `harbor_s` and `phase_seconds` diagnostics. Remove native tool timing
+  and the `tool_s` field.
+- Validate replay with the standard `agent/trajectory.json`: compare tool names
+  and arguments only; observations, outputs and IDs are not compared. Report
+  verifier rewards without gating on them.
+- Require schema-4 cassettes containing `manifest.json`, `flows.mitm` and
+  `commands.json`; older cassettes must be recaptured.
+- Reject WebSocket upgrades and report upstream HTTP status and structured JSON
+  error details in failed trial summaries and CLI errors.
+- Update the scripted Docker smoke and example image for Harbor-installed
+  agents; the image no longer preinstalls the harnesses.
+- Keep TLS verification enabled by default and document Responses versus Chat
+  Completions compatibility.
+- Add opt-in `--install-mirror cn` for Node/npm/NVM repository mirrors and
+  per-source overrides. Save resolved URLs in the cassette and restore them
+  through Harbor Compose overlays; official sources remain the default.
+  Harbor's first NVM bootstrap URL remains GitHub and is documented explicitly.
+- Verification: 10 behavior tests pass. On lyh228, unchanged Harbor 0.24.0's
+  built-in Pi 0.85.1 records two real `deepseek-v4.1-flash` calls and replays
+  them after the model relay is stopped and key removed. Both rewards are 1,
+  artifacts match at 20 bytes, and installation mirrors restore automatically.
+  The test image uses bounded curl timeouts and reachable official GitHub IPv4
+  addresses; no Harbor patch, CLI wrapper, or installer TLS bypass is used.
+- Configure OpenClaw's native Chat Completions API, primary model and required
+  model metadata explicitly. Pin 2026.7.1 for Harbor's JSONL session/trajectory
+  contract and silence non-JSON console logs; do not add custom parsers.
+- Harbor 0.24.0's built-in Codex 0.169.0 passes a two-turn scripted Responses
+  capture and provider-stopped replay with matching tool calls and 5-byte
+  artifacts. The image preinstalls the real pinned CLI; removing stale Codex
+  cache prevents a version-check warning from triggering unnecessary reinstall.
+- Diagnose Harbor 0.27.0's missing OpenClaw upload file: `auto_mounting`
+  defaults false, so host-generated config is absent inside `/logs/agent`.
+  Explicitly enable Harbor's `auto_mounting=true`; A/B mount inspection and
+  the exact config-copy command pass without modifying Harbor. Newer OpenClaw
+  session storage is not compatible with Harbor's JSONL collector; use the
+  tested 2026.7.1 release. Project dependency pins remain unchanged.
+- Verify official Terminal-Bench `fix-git` at commit `2fd12b88aafdd04a52c298e3940bcb189f9766d6`
+  using Harbor's built-in Pi and real DeepSeek: seven calls captured and seven
+  hits offline, matching tool-call trajectories, reward 1 and both official
+  verifier tests passing in record and replay. Preserve initial installer and
+  verifier-download failures as invalid attempts. Use only dependency/network
+  configuration changes, not task/test changes.
+- Add explicit `--agent-version` and `--model-api` choices, persisted for replay.
+  Native Codex 0.80.0 `wire_api=chat` passes real DeepSeek fix-git capture and
+  offline replay through Harbor 0.24.0: 13 model calls/hits, 15 tool calls,
+  reward 1, two official verifier tests passing in both phases. Default Codex
+  0.169.0 remains Responses-only; there is no automatic downgrade/converter.
+- Harbor 0.24.0's built-in OpenClaw 2026.7.1 passes the same real benchmark:
+  14 model calls/hits, 15 matching tool calls, reward 1 and both verifier tests
+  passing in record/replay after stopping the model relay and removing the key.
+  All 10 project behavior tests pass.
 
 ## Previous snapshot
 

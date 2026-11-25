@@ -1,7 +1,7 @@
-FROM node:24.22.2-bookworm-slim
+FROM ubuntu:24.04
 
-RUN npm install -g --no-audit --no-fund --fetch-retries=0 \
-      @openai/codex@0.169.0 openclaw@2026.11.3 \
- && codex --version && openclaw --version
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends bash ca-certificates curl git xz-utils \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

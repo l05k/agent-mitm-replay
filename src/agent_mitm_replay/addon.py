@@ -1,14 +1,12 @@
-"""mitmproxy addon: replay model messages and collect Codex native OTLP logs."""
+"""Record and replay model HTTP responses for Harbor agents."""
 
 import json
 import hmac
 import os
 from collections import defaultdict, deque
-from time import time_ns
 
 from mitmproxy import ctx, http, io
 
-from agent_mitm_replay.trace import codex_event, codex_log_records
 
 
 def request_key(request: http.Request) -> tuple:
@@ -36,23 +34,18 @@ def _error_response(error_type: str, message: str) -> http.Response:
 class ReplayAddon:
     def __init__(self) -> None:
         self.recorded = defaultdict(deque)
-        self.audit = self.telemetry = self.capture = None
+        self.audit = self.capture = None
         self.requests = self.matched = self.misses = self.errors = self.total = 0
-        self.telemetry_started = False
-        self.model_spans = []
 
     def load(self, loader) -> None:
         loader.add_option("amr_mode", str, "record", "record or replay", choices=["record", "replay"])
         loader.add_option("amr_flows", str, "", "Recorded flows.mitm to replay")
         loader.add_option("amr_audit", str, "", "JSONL audit file")
-        loader.add_option("amr_telemetry", str, "", "Codex OTLP log file")
         loader.add_option("amr_model_path", str, "", "Exact POST route for model inference")
 
     def configure(self, updated) -> None:
         if "amr_audit" in updated and ctx.options.amr_audit:
             self.audit = open(ctx.options.amr_audit, "w", encoding="utf-8")
-        if "amr_telemetry" in updated and ctx.options.amr_telemetry:
-            self.telemetry = open(ctx.options.amr_telemetry, "w", encoding="utf-8")
         if "amr_flows" in updated and ctx.options.amr_flows:
             if not self._replaying():
                 self.capture = open(ctx.options.amr_flows, "wb")
@@ -77,23 +70,12 @@ class ReplayAddon:
         if token and not hmac.compare_digest(flow.request.headers.get("authorization", ""), f"Bearer {token}"):
             flow.response = _error_response("unauthorized", "wrong trial token")
             return
-        if self.telemetry is not None and flow.request.path == "/amr-logs":
-            if not self.telemetry_started:
-                self.telemetry.write('{"event": "otel"}\n')
-                self.telemetry_started = True
-            for record in codex_log_records(json.loads(flow.request.get_text())):
-                if (event := codex_event(record)) is not None:
-                    self.telemetry.write(json.dumps(event) + "\n")
-            self.telemetry.flush()
-            flow.response = http.Response.make(200, b"{}", {"content-type": "application/json"})
-            return
         if flow.request.method != "POST" or flow.request.path != ctx.options.amr_model_path:
             # Codex probes optional billing metadata even with analytics disabled.
             # It is not inference and must not reach the provider or the cassette.
             flow.response = http.Response.make(404)
             return
         self.requests += 1
-        flow.metadata["amr_start_ns"] = time_ns()
         if not self._replaying():
             if key := os.getenv("AMR_UPSTREAM_KEY"):
                 flow.request.headers["authorization"] = f"Bearer {key}"
@@ -124,9 +106,8 @@ class ReplayAddon:
             flow.response.stream = True
 
     def response(self, flow: http.HTTPFlow) -> None:
-        if "amr_start_ns" not in flow.metadata:
-            return  # local telemetry, not a model exchange
-        self.model_spans.append([flow.metadata["amr_start_ns"], time_ns()])
+        if flow.request.method != "POST" or flow.request.path != ctx.options.amr_model_path:
+            return
         if self._replaying():
             return
         self.total += 1
@@ -159,13 +140,11 @@ class ReplayAddon:
             "event": "summary", "matched": self.matched, "misses": self.misses,
             "remaining": self.total - self.matched if self._replaying() else 0,
             "total": self.total, "requests": self.requests, "errors": self.errors,
-            "model_spans": self.model_spans,
         })
         if self.audit is not None:
             self.audit.close()
             self.audit = None
-        for handle in (self.capture, self.telemetry):
-            if handle is not None:
-                handle.close()
+        if self.capture is not None:
+            self.capture.close()
 
 addons = [ReplayAddon()]
