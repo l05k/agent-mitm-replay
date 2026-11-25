@@ -50,6 +50,13 @@ The environment must still reach `raw.githubusercontent.com`. Fix its network
 or DNS outside this project; do not disable certificate checks for installers.
 This option does not change apt sources or the model API endpoint.
 
+**Codex cold-install limitation:** Harbor 0.24.0 explicitly overrides
+`NVM_NODEJS_ORG_MIRROR` with `https://nodejs.org/dist` in its Codex installer.
+The configured Node mirror therefore does not apply to that cold-install
+command; the npm registry and NVM repository settings still apply. The
+validated Codex runs use a matching preinstalled native binary. This project
+does not patch Harbor to override its installer behavior.
+
 Validated on lyh228 with Harbor 0.24.0's built-in Pi 0.85.1 and real
 `deepseek-v4.1-flash`: two recorded calls, model relay stopped and key removed
 before replay, rewards 1 in both phases, identical 20-byte artifacts. The test
