@@ -3,8 +3,7 @@ import json
 from pathlib import Path
 import sys
 
-from .native import AGENTS
-from .runner import ReplayError, run_trial
+from .runner import AGENTS, CN_MIRRORS, ReplayError, run_trial
 
 
 def _mount(value: str) -> tuple[str, str]:
@@ -14,8 +13,23 @@ def _mount(value: str) -> tuple[str, str]:
     return source, target
 
 
+def _mirror_options(parser) -> None:
+    parser.add_argument("--install-mirror", choices=("official", "cn"), default="official")
+    parser.add_argument("--node-mirror", help="Node.js binary mirror base URL")
+    parser.add_argument("--npm-registry", help="npm registry URL")
+    parser.add_argument("--nvm-source", help="NVM git repository URL (bootstrap URL is controlled by Harbor)")
+
+
+def _mirrors(args) -> dict[str, str]:
+    result = dict(CN_MIRRORS) if args.install_mirror == "cn" else {}
+    for key, value in (("node", args.node_mirror), ("npm", args.npm_registry), ("nvm", args.nvm_source)):
+        if value:
+            result[key] = value
+    return result
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Capture or measure a native Harbor agent trajectory.")
+    parser = argparse.ArgumentParser(description="Capture or measure a Harbor built-in agent trajectory.")
     commands = parser.add_subparsers(dest="mode", required=True)
     for mode in ("record", "replay"):
         command = commands.add_parser(mode)
@@ -27,18 +41,29 @@ def main() -> int:
             command.add_argument("--agent", choices=AGENTS, required=True)
             command.add_argument("--model", required=True, help="openai/<model>")
             command.add_argument("--upstream", required=True, help="Provider base URL, including the API prefix")
-    smoke = commands.add_parser("smoke", help="Exercise both native harnesses in Docker with scripted replies")
+            command.add_argument("--agent-version", help="Native CLI version installed by Harbor")
+            command.add_argument("--model-api", choices=("responses", "chat-completions"),
+                                 help="Wire protocol; defaults to Responses for Codex, Chat Completions otherwise")
+            _mirror_options(command)
+    smoke = commands.add_parser("smoke", help="Exercise Harbor's built-in agents in Docker with scripted replies")
     smoke.add_argument("--output", type=Path, required=True)
-    smoke.add_argument("--image", required=True, help="Prebuilt Docker image containing both pinned harnesses")
+    smoke.add_argument("--image", required=True, help="Base Docker image; Harbor installs the selected pinned agents")
+    smoke.add_argument("--agent", choices=AGENTS, action="append",
+                       help="Built-in agent to check (repeatable; default: all)")
+    _mirror_options(smoke)
     args = parser.parse_args()
     try:
         if args.mode == "smoke":
             from .smoke import run_smoke
-            result = run_smoke(args.output, args.image)
+            result = run_smoke(args.output, args.image, agents=args.agent, install_mirrors=_mirrors(args))
         else:
-            params = vars(args)
-            mode, params['mounts'] = params.pop('mode'), params.pop('mount')
-            result = run_trial(mode, **params)
+            result = run_trial(
+                args.mode, task=args.task, cassette=args.cassette, output=args.output, mounts=args.mount,
+                agent=getattr(args, "agent", None), model=getattr(args, "model", None),
+                upstream=getattr(args, "upstream", None),
+                agent_version=getattr(args, "agent_version", None), model_api=getattr(args, "model_api", None),
+                install_mirrors=_mirrors(args) if args.mode == "record" else None,
+            )
     except (ReplayError, OSError, ValueError, KeyError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

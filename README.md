@@ -1,19 +1,30 @@
 # agent-mitm-replay
 
-Record model responses from Codex or OpenClaw in a real Harbor task, then run
-and validate that task offline on a restored workspace. This measures **native
-harness tool wall time**, not model or whole-agent latency.
+Record and replay the model HTTP exchanges of Harbor's built-in Codex,
+OpenClaw and Pi agents on a real task. Recording sends model requests to an
+OpenAI-compatible endpoint; replay serves the recorded responses locally so the
+same Harbor task can run again without a provider.
 
-- `record` captures the model exchanges and the actual tools and outcomes. Task
-  reward is recorded but not used to select traces.
-- `replay` reexecutes the tools and accepts a timing only when the request
-  sequence and tool evidence match. Divergence, errors and timeouts are not
-  timing samples.
+The reported timing metric is Harbor's `agent_execution` phase
+(`agent_execution_s`). It includes the agent's model calls, tool work and
+harness overhead; it is not native tool wall time or pure model latency.
+`harbor_s` and the individual `phase_seconds` are diagnostic context.
 
-Requires a local Linux Docker daemon, Compose v2, Python 3.13, Harbor 0.24.0,
-and a task image containing the pinned native harness. The image and workspace
-are prepared by the experimenter; the runner never installs an agent in a
-measured trial.
+Replay requires every recorded model response to be consumed and compares the
+standard Harbor trajectory's tool names and arguments. It does not compare tool
+outputs, observations or call IDs, so the same tool calls with different
+filesystem effects can pass. Verifier rewards are reported but do not gate a
+trial. This is model-response replay, not an exact workload or syscall claim.
+
+The only custom component in a measured trial is the HTTP record/replay proxy.
+Harbor launches its built-in agent adapter, installs and configures the pinned
+CLI in the container, writes the agent logs and `agent/trajectory.json`, and
+runs the verifier. The task image must provide bash, curl, git and CA
+certificates on a glibc-based distribution, and the environment must allow
+Harbor's installer to reach nvm, Node.js and npm. "Offline replay" means no
+model provider, not an air-gapped trial.
+
+Requires a local Linux Docker daemon, Compose v2, Python 3.13 and Harbor 0.24.0.
 
 ```sh
 uv sync --locked
