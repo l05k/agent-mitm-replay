@@ -3,6 +3,8 @@
 import json
 import hmac
 import os
+import re
+import time
 from collections import defaultdict, deque
 
 from mitmproxy import ctx, http, io
@@ -26,6 +28,38 @@ def _is_redirect(response: http.Response) -> bool:
     """The model client would follow it, leaving the proxy."""
     return response.status_code in REDIRECTS and "location" in response.headers
 
+
+
+def _complete_sse(response: http.Response, path: str) -> bool:
+    """Require a dispatched terminal SSE event, not just an HTTP 200."""
+    if not 200 <= response.status_code < 300:
+        return False
+    if not response.headers.get("content-type", "").lower().startswith("text/event-stream"):
+        return False
+    try:
+        body = response.content or b""
+    except ValueError:
+        return False
+    data = []
+    complete = False
+    lines = re.split(rb"\r\n|\r|\n", body)
+    for line in lines[:-1]:
+        if not line:
+            if data:
+                payload = b"\n".join(data)
+                complete = payload == b"[DONE]"
+                if path.endswith("/responses"):
+                    try:
+                        complete = json.loads(payload).get("type") == "response.completed"
+                    except (ValueError, AttributeError):
+                        complete = False
+                data = []
+        elif line.startswith(b"data:"):
+            value = line[5:]
+            data.append(value[1:] if value.startswith(b" ") else value)
+    return complete and not data and not lines[-1]
+
+
 def _error_response(error_type: str, message: str) -> http.Response:
     return http.Response.make(
         400, json.dumps({"error": {"type": error_type, "message": message}}), {"content-type": "application/json"}
@@ -36,6 +70,7 @@ class ReplayAddon:
         self.recorded = defaultdict(deque)
         self.audit = self.capture = None
         self.requests = self.matched = self.misses = self.errors = self.total = 0
+        self.streams: dict[str, bytearray] = {}
 
     def load(self, loader) -> None:
         loader.add_option("amr_mode", str, "record", "record or replay", choices=["record", "replay"])
@@ -76,6 +111,7 @@ class ReplayAddon:
             flow.response = http.Response.make(404)
             return
         self.requests += 1
+        flow.metadata["amr_turn"] = self.requests
         if not self._replaying():
             if key := os.getenv("AMR_UPSTREAM_KEY"):
                 flow.request.headers["authorization"] = f"Bearer {key}"
@@ -102,10 +138,22 @@ class ReplayAddon:
         self._log("hit")
 
     def responseheaders(self, flow: http.HTTPFlow) -> None:
-        if not self._replaying() and flow.response.headers.get("content-type", "").startswith("text/event-stream"):
-            flow.response.stream = True
+        if (not self._replaying() and "amr_turn" in flow.metadata
+                and flow.response.headers.get("content-type", "").lower().startswith("text/event-stream")):
+            body = self.streams[flow.id] = bytearray()
+
+            def capture(chunk: bytes) -> bytes:
+                # mitmproxy only assigns raw_content at HTTP EOF. A client can
+                # cancel after the SSE terminal event but before that EOF.
+                body.extend(chunk)
+                return chunk
+
+            flow.response.stream = capture
 
     def response(self, flow: http.HTTPFlow) -> None:
+        self.streams.pop(flow.id, None)
+        if flow.metadata.get("amr_recorded"):
+            return
         if flow.request.method != "POST" or flow.request.path != ctx.options.amr_model_path:
             return
         if self._replaying():
@@ -126,12 +174,36 @@ class ReplayAddon:
                          "method": flow.request.method, "path": flow.request.path,
                          "status": flow.response.status_code, "upstream_error": detail})
             return
+        flow.metadata["amr_recorded"] = True
         if self.capture is not None:
             flow.request.headers.pop("authorization", None)
             io.FlowWriter(self.capture).add(flow)
         self._log("response")
 
     def error(self, flow: http.HTTPFlow) -> None:
+        body = self.streams.pop(flow.id, None)
+        if "amr_turn" not in flow.metadata or flow.metadata.get("amr_recorded"):
+            return
+        message = flow.error.msg if flow.error else ""
+        client_closed = message == "Client disconnected." or message == "stream reset by client (CANCEL)"
+        if client_closed and flow.response is not None:
+            candidate = flow.response.copy()
+            if body is not None:
+                candidate.raw_content = bytes(body)
+            if _complete_sse(candidate, flow.request.path):
+                if self._replaying():
+                    if flow.is_replay == "response":
+                        return  # Already counted as a hit; the full body was served.
+                else:
+                    # Persist the bytes seen by the stream hook, never an empty
+                    # or stale body from the aborted HTTP response.
+                    candidate.headers.pop("transfer-encoding", None)
+                    candidate.headers["content-length"] = str(len(candidate.raw_content or b""))
+                    candidate.timestamp_end = time.time()
+                    flow.response = candidate
+                    flow.error = None
+                    self.response(flow)
+                    return
         self.errors += 1
         self._log("error")
 

@@ -24,6 +24,14 @@ and stores only successful HTTP model exchanges. The key never enters the
 container; the agent receives an ephemeral per-trial token. Saved flows have
 authorization removed. Replay has no provider credential.
 
+SSE clients may close the connection after the protocol terminal event without
+waiting for HTTP EOF. Recording observes streamed bytes and accepts that client
+disconnect only after a fully framed `[DONE]` (Chat Completions) or
+`response.completed` data event (Responses), with a 2xx SSE response. It stores
+the complete body and counts the exchange once even when mitmproxy calls
+`error` instead of `response`. Incomplete streams, upstream transport failures
+and non-success status codes still fail the audit gate.
+
 Replay matches method, route, model, streaming mode and conversation shape;
 recorded order is used within each match key. Exact prompt bytes and generated
 transport IDs are not request keys. An unmatched request or an unused recorded

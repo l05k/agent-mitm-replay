@@ -1,6 +1,10 @@
 import json
+import gzip
+
+import pytest
 
 from mitmproxy import http, io
+from mitmproxy.flow import Error
 from mitmproxy.test import taddons, tflow
 
 from agent_mitm_replay.addon import ReplayAddon
@@ -105,3 +109,79 @@ def test_websocket_upgrade_cannot_be_recorded_or_replayed(tmp_path):
         assert json.loads(request.response.get_text())['error']['type'] == 'unsupported_websocket'
         assert 'upgrade' not in request.response.headers
         addon.done()
+
+
+@pytest.mark.parametrize('path,terminal', [
+    ('/v1/chat/completions', b'data: [DONE]\r\n\r\n'),
+    ('/v1/responses', b'event: response.completed\ndata: {"type":"response.completed"}\n\n'),
+])
+@pytest.mark.parametrize('compressed', [False, True])
+def test_completed_sse_client_disconnect_is_recorded_and_replayable(tmp_path, path, terminal, compressed):
+    addon = ReplayAddon()
+    cassette, audit = tmp_path / 'flows.mitm', tmp_path / 'audit.jsonl'
+    content = b'data: {"delta":"hello"}\n\n' + terminal
+    wire = gzip.compress(content) if compressed else content
+    with taddons.context(addon) as settings:
+        settings.configure(addon, amr_mode='record', amr_flows=str(cassette),
+                           amr_audit=str(audit), amr_model_path=path)
+        flow = model_flow(path=path)
+        flow.request.headers['authorization'] = 'Bearer secret'
+        addon.request(flow)
+        flow.response = http.Response.make(200, b'', {'content-type': 'text/event-stream',
+                                                      'transfer-encoding': 'chunked'})
+        if compressed:
+            flow.response.headers['content-encoding'] = 'gzip'
+        addon.responseheaders(flow)
+        # mitmproxy has not assigned the streamed body when error() runs.
+        flow.response.raw_content = None
+        for offset in range(0, len(wire), 3):
+            chunk = wire[offset:offset + 3]
+            assert flow.response.stream(chunk) == chunk
+        flow.error = Error('Client disconnected.')
+        addon.error(flow)
+        addon.response(flow)  # Defensive: do not record the turn twice.
+        addon.done()
+    saved, = io.read_flows_from_paths([str(cassette)])
+    assert saved.response.raw_content == wire
+    assert saved.response.content == content
+    assert saved.error is None
+    assert 'authorization' not in saved.request.headers
+    assert 'transfer-encoding' not in saved.response.headers
+    assert saved.response.headers['content-length'] == str(len(wire))
+    summary = json.loads(audit.read_text().splitlines()[-1])
+    assert summary['errors'] == 0 and summary['total'] == summary['requests'] == 1
+    replay = ReplayAddon()
+    with taddons.context(replay) as settings:
+        settings.configure(replay, amr_mode='replay', amr_flows=str(cassette), amr_model_path=path)
+        request = model_flow(text='different prompt', path=path)
+        replay.request(request)
+        assert request.response.content == content
+        request.error = Error('stream reset by client (CANCEL)')
+        replay.error(request)
+        assert replay.errors == 0 and replay.matched == 1
+        replay.done()
+
+
+@pytest.mark.parametrize('body,error,status', [
+    (b'data: {"delta":"partial"}\n\n', 'Client disconnected.', 200),
+    (b'data: [DONE]\n', 'Client disconnected.', 200),
+    (b'data: [DONE]\n\n', 'server connection reset', 200),
+    (b'data: [DONE]\n\n', 'Client disconnected.', 500),
+])
+def test_incomplete_or_upstream_failed_sse_still_fails(tmp_path, body, error, status):
+    addon = ReplayAddon()
+    cassette, audit = tmp_path / 'flows.mitm', tmp_path / 'audit.jsonl'
+    with taddons.context(addon) as settings:
+        settings.configure(addon, amr_mode='record', amr_flows=str(cassette),
+                           amr_audit=str(audit), amr_model_path='/v1/chat/completions')
+        flow = model_flow()
+        addon.request(flow)
+        flow.response = http.Response.make(status, b'', {'content-type': 'text/event-stream'})
+        addon.responseheaders(flow)
+        flow.response.stream(body)
+        flow.error = Error(error)
+        addon.error(flow)
+        addon.done()
+    assert list(io.read_flows_from_paths([str(cassette)])) == []
+    summary = json.loads(audit.read_text().splitlines()[-1])
+    assert summary['errors'] == 1 and summary['total'] == 0
