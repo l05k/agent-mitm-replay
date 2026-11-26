@@ -5,6 +5,8 @@ import hmac
 import os
 import re
 import time
+import gzip
+import zlib
 from collections import defaultdict, deque
 
 from mitmproxy import ctx, http, io
@@ -37,8 +39,21 @@ def _complete_sse(response: http.Response, path: str) -> bool:
     if not response.headers.get("content-type", "").lower().startswith("text/event-stream"):
         return False
     try:
-        body = response.content or b""
-    except ValueError:
+        raw = response.raw_content or b""
+        encoding = response.headers.get("content-encoding", "identity").lower()
+        if encoding in {"gzip", "x-gzip"}:
+            # mitmproxy's decoder tolerates missing gzip trailers.
+            body = gzip.decompress(raw)
+        elif encoding == "deflate":
+            try:
+                body = zlib.decompress(raw)
+            except zlib.error:
+                body = zlib.decompress(raw, -zlib.MAX_WBITS)
+        elif encoding == "identity":
+            body = raw
+        else:
+            return False  # Do not recover encodings we cannot strictly validate.
+    except (ValueError, OSError, EOFError, zlib.error):
         return False
     data = []
     complete = False
@@ -185,7 +200,9 @@ class ReplayAddon:
         if "amr_turn" not in flow.metadata or flow.metadata.get("amr_recorded"):
             return
         message = flow.error.msg if flow.error else ""
-        client_closed = message == "Client disconnected." or message == "stream reset by client (CANCEL)"
+        # HTTP/2 uses the same CANCEL text for both peers, so it cannot prove
+        # a normal client cancellation. Keep ambiguous resets failing.
+        client_closed = message == "Client disconnected."
         if client_closed and flow.response is not None:
             candidate = flow.response.copy()
             if body is not None:

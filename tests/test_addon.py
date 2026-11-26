@@ -156,7 +156,7 @@ def test_completed_sse_client_disconnect_is_recorded_and_replayable(tmp_path, pa
         request = model_flow(text='different prompt', path=path)
         replay.request(request)
         assert request.response.content == content
-        request.error = Error('stream reset by client (CANCEL)')
+        request.error = Error('Client disconnected.')
         replay.error(request)
         assert replay.errors == 0 and replay.matched == 1
         replay.done()
@@ -166,6 +166,7 @@ def test_completed_sse_client_disconnect_is_recorded_and_replayable(tmp_path, pa
     (b'data: {"delta":"partial"}\n\n', 'Client disconnected.', 200),
     (b'data: [DONE]\n', 'Client disconnected.', 200),
     (b'data: [DONE]\n\n', 'server connection reset', 200),
+    (b'data: [DONE]\n\n', 'stream reset by client (CANCEL)', 200),
     (b'data: [DONE]\n\n', 'Client disconnected.', 500),
 ])
 def test_incomplete_or_upstream_failed_sse_still_fails(tmp_path, body, error, status):
@@ -180,6 +181,31 @@ def test_incomplete_or_upstream_failed_sse_still_fails(tmp_path, body, error, st
         addon.responseheaders(flow)
         flow.response.stream(body)
         flow.error = Error(error)
+        addon.error(flow)
+        addon.done()
+    assert list(io.read_flows_from_paths([str(cassette)])) == []
+    summary = json.loads(audit.read_text().splitlines()[-1])
+    assert summary['errors'] == 1 and summary['total'] == 0
+
+
+@pytest.mark.parametrize('encoding', ['gzip', 'deflate'])
+def test_truncated_compression_with_terminal_sse_is_not_recorded(tmp_path, encoding):
+    import zlib
+
+    addon = ReplayAddon()
+    cassette, audit = tmp_path / 'flows.mitm', tmp_path / 'audit.jsonl'
+    with taddons.context(addon) as settings:
+        settings.configure(addon, amr_mode='record', amr_flows=str(cassette),
+                           amr_audit=str(audit), amr_model_path='/v1/chat/completions')
+        flow = model_flow()
+        addon.request(flow)
+        flow.response = http.Response.make(200, b'', {
+            'content-type': 'text/event-stream', 'content-encoding': encoding})
+        addon.responseheaders(flow)
+        content = b'data: [DONE]\n\n'
+        wire = gzip.compress(content)[:-8] if encoding == 'gzip' else zlib.compress(content)[:-4]
+        flow.response.stream(wire)
+        flow.error = Error('Client disconnected.')
         addon.error(flow)
         addon.done()
     assert list(io.read_flows_from_paths([str(cassette)])) == []

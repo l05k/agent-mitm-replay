@@ -31,6 +31,10 @@ disconnect only after a fully framed `[DONE]` (Chat Completions) or
 the complete body and counts the exchange once even when mitmproxy calls
 `error` instead of `response`. Incomplete streams, upstream transport failures
 and non-success status codes still fail the audit gate.
+Recovery requires mitmproxy's unambiguous HTTP/1 client-disconnect signal.
+HTTP/2 CANCEL text is shared by both peers and remains an error. Gzip/deflate
+must pass strict decompression including their stream termination/integrity;
+unknown content encodings are not recovered from an error hook.
 
 Replay matches method, route, model, streaming mode and conversation shape;
 recorded order is used within each match key. Exact prompt bytes and generated

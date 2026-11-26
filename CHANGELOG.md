@@ -8,6 +8,11 @@
   strict errors for incomplete streams, upstream failures and non-2xx replies.
 - Verify 18 behavior tests and an actual TCP RST after `[DONE]` while the
   provider keeps the HTTP response open; audit reports one response, zero errors.
+- Review hardening: reject ambiguous HTTP/2 CANCEL errors and validate gzip/
+  deflate integrity before recovery, so compressed truncation cannot be saved
+  as a successful response merely because its decoded text contains `[DONE]`.
+- Final reviewed behavior suite: 21 tests pass, including ambiguous reset and
+  truncated gzip/deflate rejection.
 
 - Launch Harbor's built-in `codex`, `openclaw` and `pi` agents instead of
   project-owned agent adapters and tool-timing plugins. Harbor owns in-container
