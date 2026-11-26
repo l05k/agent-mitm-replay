@@ -86,14 +86,20 @@ class ReplayAddon:
         self.audit = self.capture = None
         self.requests = self.matched = self.misses = self.errors = self.total = 0
         self.streams: dict[str, bytearray] = {}
+        self.tool_log = None
 
     def load(self, loader) -> None:
         loader.add_option("amr_mode", str, "record", "record or replay", choices=["record", "replay"])
         loader.add_option("amr_flows", str, "", "Recorded flows.mitm to replay")
         loader.add_option("amr_audit", str, "", "JSONL audit file")
         loader.add_option("amr_model_path", str, "", "Exact POST route for model inference")
+        loader.add_option("amr_codex_tools", str, "", "Local Codex native tool timing JSONL")
 
     def configure(self, updated) -> None:
+        if "amr_codex_tools" in updated and ctx.options.amr_codex_tools:
+            self.tool_log = open(ctx.options.amr_codex_tools, "w", encoding="utf-8")
+            self.tool_log.write('{"event":"otel"}\n')
+            self.tool_log.flush()
         if "amr_audit" in updated and ctx.options.amr_audit:
             self.audit = open(ctx.options.amr_audit, "w", encoding="utf-8")
         if "amr_flows" in updated and ctx.options.amr_flows:
@@ -119,6 +125,25 @@ class ReplayAddon:
         token = os.getenv("AMR_TRIAL_TOKEN")
         if token and not hmac.compare_digest(flow.request.headers.get("authorization", ""), f"Bearer {token}"):
             flow.response = _error_response("unauthorized", "wrong trial token")
+            return
+        if self.tool_log is not None and flow.request.method == "POST" and flow.request.path == "/amr-logs":
+            # Native telemetry is local-only; never forward or count it as a
+            # model exchange, including during offline replay.
+            flow.response = _error_response("invalid_telemetry", "invalid native tool timing payload")
+            payload = json.loads(flow.request.get_text())
+            for resource in payload.get("resourceLogs", []):
+                for scope in resource.get("scopeLogs", []):
+                    for record in scope.get("logRecords", []):
+                        attrs = {item["key"]: next(iter(item["value"].values()))
+                                 for item in record.get("attributes", [])}
+                        if attrs.get("event.name") != "codex.tool_result":
+                            continue
+                        seq = attrs.get("tool_result_seq")
+                        event = {"seq": int(seq) if seq is not None else None, "id": attrs["call_id"],
+                                 "duration_ns": int(attrs["duration_ms"]) * 1_000_000}
+                        self.tool_log.write(json.dumps(event) + "\n")
+            self.tool_log.flush()
+            flow.response = http.Response.make(200, b"{}", {"content-type": "application/json"})
             return
         if flow.request.method != "POST" or flow.request.path != ctx.options.amr_model_path:
             # Codex probes optional billing metadata even with analytics disabled.
@@ -235,5 +260,8 @@ class ReplayAddon:
             self.audit = None
         if self.capture is not None:
             self.capture.close()
+        if self.tool_log is not None:
+            self.tool_log.close()
+            self.tool_log = None
 
 addons = [ReplayAddon()]

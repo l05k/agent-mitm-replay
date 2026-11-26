@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- Expose `--agent-timeout-multiplier` on record and replay. Save the resolved
+  multiplier with the cassette; replay defaults to it and permits an explicit
+  override. Reject non-finite/non-positive values before starting a trial.
+- Restore `tool_s` as the sum of native per-tool execution durations, counting
+  parallel calls separately. Keep Harbor's `agent_execution_s` distinct and
+  fail when native timing evidence is missing or incomplete; no turn-time
+  subtraction or inferred tool latency.
+- Require schema-5 cassettes with timeout and native timing configuration.
+  Timed-out recordings remain invalid samples with partial flows/logs only.
+- Remote targeted regressions: 43 passed. Real Harbor timeout proof (2-second
+  task budget multiplied by 2) returns `AgentTimeoutError` after about 4.4
+  seconds, without a complete cassette. Built-in Codex 0.169 native-tool timing
+  and provider-stopped replay pass, including replay timeout override.
+- Historical native Codex 0.80 Chat mode also passes remote capture/replay
+  with native OTLP durations and the recorded timeout multiplier inherited.
+- Terminal-Bench 2.1 `circuit-fibsqrt` Pi/OpenClaw end-to-end verification was
+  stopped at the user's request. Attempts failed during Harbor's NVM bootstrap
+  (network error / agent setup timeout), before model execution; retain them as
+  invalid infrastructure attempts. Do not claim those task-harness pairs pass.
+- Review correction: bundle and read-only mount OpenClaw's required plugin
+  manifest alongside the timing hook so native plugin discovery can load it.
+
 - Treat client cancellation after a complete SSE terminal event as a successful
   model response, including the mitmproxy `error` hook path. Capture streamed
   bytes before HTTP EOF, persist a clean replayable response once, and retain

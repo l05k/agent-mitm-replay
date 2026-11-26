@@ -24,6 +24,35 @@ Node 24 for OpenClaw. OpenClaw 2026.7.1 supports both current Node lines.
 `--agent-version VERSION` explicitly selects a native CLI version. The chosen
 version and `--model-api` are saved in the manifest and restored on replay.
 
+### Agent execution timeout
+
+`record` and `replay` accept `--agent-timeout-multiplier FLOAT`, forwarded to
+Harbor's agent execution timeout only. Recording defaults to `1`; replay uses
+the recorded multiplier unless explicitly overridden. The resolved value is
+saved in the manifest, `command.json` and successful `summary.json`.
+
+For example, `--agent-timeout-multiplier 4` gives a task with a 900-second
+agent budget 3600 seconds; it does not change installer or verifier timeouts.
+Read the selected task's `[agent].timeout_sec`: Terminal-Bench 2.1's official
+`circuit-fibsqrt` currently specifies 3600 seconds before multiplication.
+
+A timed-out run remains `status=timeout`. Partial flows and logs are diagnostic
+only; no complete manifest/command cassette or valid timing sample is emitted.
+
+The Terminal-Bench **2.1** `circuit-fibsqrt` reproduction uses
+`harbor-framework/terminal-bench-2-1` revision
+`12b7565679ce5006230b820666353673a133db93`, directory
+`tasks/circuit-fibsqrt`, not the 2.0 task. Its official image is
+`alexgshaw/circuit-fibsqrt:20251031` (manifest
+`sha256:29783439f529eaed2145592f15af7a2281161528860392a382c825489030ae3a`).
+Installer-only image layers may provide curl, NVM/Node and verifier dependencies;
+keep `/app`, instructions and verifier logic unchanged. Temporary raw-GitHub
+edge-IP overrides are host-specific diagnostics, not project defaults.
+Pi/OpenClaw end-to-end runs on this task are **not verified**: the attempted
+remote runs failed in Harbor's NVM bootstrap, before agent execution, and
+further verification was canceled. Increasing the execution timeout does not
+change Harbor's separate agent setup timeout or fix installer network access.
+
 ### Optional installation mirrors
 
 `record` and `smoke` accept `--install-mirror cn`. Official sources remain the
@@ -196,20 +225,26 @@ be mistaken for a project-wide certificate bypass.
 `--output DIRECTORY` must be new. Defaults are `CASSETTE/record` and
 `CASSETTE/replays/<id>`. A complete capture has `manifest.json`, `flows.mitm`
 and `commands.json`. The manifest records the agent, pinned CLI version,
-model, upstream, task SHA-256, installation mirrors and mount destinations; replay rejects a
-different agent version, task content or destination set. Require schema 4:
-older cassettes must be recaptured; there is no migration.
+model, upstream, task SHA-256, installation mirrors, agent timeout multiplier
+and mount destinations; replay rejects a different task content or destination
+set. Require schema 5: older cassettes must be recaptured; there is no migration.
 
 Every run writes Harbor logs under `jobs/`, plus `proxy.log`, `harbor.log`,
 `proxy-audit.jsonl` and `command.json`. A classified failure writes
 `summary.json` with `status=divergence|error|timeout` and no timing fields.
 Setup errors such as a mismatched task or unavailable Docker abort the
 experiment.
+Native tool timing is kept in the trial's `agent/amr-timing.jsonl` for Pi and
+OpenClaw, or in the run's `codex-tools.jsonl` for Codex. Hook assets are mounted
+read-only, outside task data mounts. Missing/incomplete timing invalidates the
+sample; these logs do not replace Harbor's tool-call trajectory.
 
-`summary.json` fields on success: `agent_execution_s` (the comparison metric,
-from Harbor's `agent_execution` phase), `harbor_s` (whole subprocess,
-diagnostic only), `phase_seconds`, `model_requests`, and `rewards` (reported,
-not a gate). Never put a failed attempt into a timing distribution.
+`summary.json` fields on success: `tool_s` (sum of native tool-call durations),
+`agent_execution_s` (Harbor's whole agent execution phase), `harbor_s` (whole
+subprocess, diagnostic only), `phase_seconds`, `agent_timeout_multiplier`,
+`model_requests`, and `rewards` (reported, not a gate). Parallel tool calls each
+contribute their full duration. Never put a failed attempt into a timing
+distribution, and do not label the whole agent phase as pure tool time.
 
 ## Local smoke
 

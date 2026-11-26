@@ -16,7 +16,8 @@ procedure across backends; do not describe the result as cold-cache.
 
 The runner compares the standard Harbor trajectory's tool names and arguments
 only; it does not compare tool outputs, observations or filesystem effects, and
-reward is not an inclusion criterion. Compare `agent_execution_s` across
+reward is not an inclusion criterion. Compare `tool_s` (sum of native tool
+durations) and `agent_execution_s` (whole agent phase) separately across
 accepted replays only, not capture runs or `harbor_s`. Keep and report
 uncaptured tasks, divergence, runtime errors and timeouts. Do not describe the
 result as an exact workload.
