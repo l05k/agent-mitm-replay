@@ -21,6 +21,8 @@
   stopped at the user's request. Attempts failed during Harbor's NVM bootstrap
   (network error / agent setup timeout), before model execution; retain them as
   invalid infrastructure attempts. Do not claim those task-harness pairs pass.
+- Review correction: bundle and read-only mount OpenClaw's required plugin
+  manifest alongside the timing hook so native plugin discovery can load it.
 
 - Treat client cancellation after a complete SSE terminal event as a successful
   model response, including the mitmproxy `error` hook path. Capture streamed

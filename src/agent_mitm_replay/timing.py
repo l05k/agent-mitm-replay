@@ -88,6 +88,8 @@ def prepare_timing(
     elif agent == "openclaw":
         plugin = _stage_asset(output, OPENCLAW_PLUGIN_FILENAME, "amr-timing.mjs")
         mounts.append((str(plugin), _OPENCLAW_MOUNT))
+        manifest = _stage_asset(output, "openclaw.plugin.json", "openclaw.plugin.json")
+        mounts.append((str(manifest), "/opt/amr-timing/openclaw.plugin.json"))
         options["openclaw_config"] = {
             "plugins": {
                 "allow": ["amr-timing", "openai"],

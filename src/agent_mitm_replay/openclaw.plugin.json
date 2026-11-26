@@ -1,0 +1,8 @@
+{
+  "id": "amr-timing",
+  "name": "Native tool timing",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false
+  }
+}
