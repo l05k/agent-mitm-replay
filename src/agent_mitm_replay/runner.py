@@ -3,6 +3,7 @@
 from datetime import datetime
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -12,6 +13,8 @@ import sys
 import time
 from urllib.parse import urlsplit
 import uuid
+
+from .timing import TimingError, prepare_timing, tool_seconds
 
 AGENTS = {"codex": "0.169.0", "openclaw": "2026.7.1", "pi": "0.85.1"}
 CN_MIRRORS = {
@@ -143,7 +146,8 @@ def run_trial(mode: str, *, task: Path, cassette: Path, agent: str | None = None
               output: Path | None = None, mounts: list[tuple[str, str]] | None = None,
               env: dict[str, str] | None = None,
               install_mirrors: dict[str, str] | None = None,
-              agent_version: str | None = None, model_api: str | None = None) -> dict:
+              agent_version: str | None = None, model_api: str | None = None,
+              agent_timeout_multiplier: float | None = None) -> dict:
     if mode not in {"record", "replay"}:
         raise ReplayError(f"Unknown mode: {mode}")
     recording = mode == "record"
@@ -158,25 +162,31 @@ def run_trial(mode: str, *, task: Path, cassette: Path, agent: str | None = None
         if agent != "codex" and model_api != "chat-completions":
             raise ReplayError("Pi and OpenClaw require chat-completions in this runner")
         install_mirrors = dict(install_mirrors or {})
+        agent_timeout_multiplier = 1.0 if agent_timeout_multiplier is None else agent_timeout_multiplier
         for name, address in install_mirrors.items():
             parsed = urlsplit(address)
             if name not in CN_MIRRORS or parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 raise ReplayError(f"Invalid installer mirror: {name}={address}")
-        manifest = {"schema_version": 4, "agent": agent, "agent_version": agent_version,
+        manifest = {"schema_version": 5, "agent": agent, "agent_version": agent_version,
                     "model_api": model_api, "model": model, "upstream": upstream, "task_sha256": digest,
-                    "mounts": [target for _, target in mounts or []], "install_mirrors": install_mirrors}
+                    "mounts": [target for _, target in mounts or []], "install_mirrors": install_mirrors,
+                    "agent_timeout_multiplier": agent_timeout_multiplier}
     else:
         manifest = _read_json(cassette / "manifest.json")
-        if manifest["schema_version"] != 4:
-            raise ReplayError("Record a new cassette with Harbor's built-in agents")
+        if manifest["schema_version"] != 5:
+            raise ReplayError("Record a new cassette with tool timing and agent timeout configuration")
         agent, model, upstream = manifest["agent"], manifest["model"], manifest["upstream"]
         install_mirrors = manifest["install_mirrors"]
         agent_version, model_api = manifest["agent_version"], manifest["model_api"]
+        if agent_timeout_multiplier is None:
+            agent_timeout_multiplier = manifest["agent_timeout_multiplier"]
         if manifest["task_sha256"] != digest:
             raise ReplayError("Task inputs differ from the recording")
         if manifest["mounts"] != [target for _, target in mounts or []]:
             raise ReplayError("Task mount destinations differ from the recording")
         reference = _read_json(cassette / "commands.json")
+    if not math.isfinite(agent_timeout_multiplier) or agent_timeout_multiplier <= 0:
+        raise ReplayError("--agent-timeout-multiplier must be finite and positive")
     if not model.startswith("openai/") or not model.removeprefix("openai/"):
         raise ReplayError("Use an openai/<model> identifier for the compatible gateway")
     url = urlsplit(upstream)
@@ -195,6 +205,7 @@ def run_trial(mode: str, *, task: Path, cassette: Path, agent: str | None = None
     model_path = api_prefix + ("/responses" if model_api == "responses" else "/chat/completions")
     audit = output / "proxy-audit.jsonl"
     token = uuid.uuid4().hex
+    timing = prepare_timing(output, agent, agent_version, proxy_url=proxy_url, token=token)
     bin_dir = Path(sys.executable).parent
     proxy_command = [
         str(bin_dir / "mitmdump"), "-q", "--mode", f"reverse:{url.scheme}://{url.netloc}",
@@ -204,10 +215,16 @@ def run_trial(mode: str, *, task: Path, cassette: Path, agent: str | None = None
         "--set", f"amr_mode={mode}", "--set", f"amr_flows={cassette.resolve() / 'flows.mitm'}",
         "--set", f"amr_audit={audit}", "--set", f"amr_model_path={model_path}",
     ]
+    if agent == "codex":
+        proxy_command += ["--set", f"amr_codex_tools={output / 'codex-tools.jsonl'}"]
     sources = [{"type": "bind", "source": str(Path(source).resolve()), "target": target,
                 "bind": {"create_host_path": False}} for source, target in mounts or []]
+    sources.extend({"type": "bind", "source": str(Path(source).resolve()), "target": target,
+                    "read_only": True, "bind": {"create_host_path": False}}
+                   for source, target in timing["mounts"])
     command = [str(bin_dir / "harbor"), "run", "--yes", "--path", str(task),
                "--agent", agent, "--model", model,
+               "--agent-timeout-multiplier", str(agent_timeout_multiplier),
                "--n-concurrent", "1", "--n-attempts", "1", "--max-retries", "0",
                "--jobs-dir", str(output / "jobs"), "--job-name", "trial",
                "--environment-kwarg", "auto_mounting=true",
@@ -240,10 +257,13 @@ def run_trial(mode: str, *, task: Path, cassette: Path, agent: str | None = None
                 "models": [{"id": model_id, "name": model_id, "api": "openai-completions"}],
             }}},
         }
+    for name, value in timing["options"].items():
+        options.setdefault(name, {}).update(value)
     for name, value in options.items():
         command += ["--agent-kwarg", f"{name}={json.dumps(value)}"]
     for name, value in {"OPENAI_BASE_URL": base_url, "OPENAI_API_BASE": base_url,
-                        "OPENAI_API_KEY": token, "NO_PROXY": f"{gateway},127.0.0.1,localhost"}.items():
+                        "OPENAI_API_KEY": token, "NO_PROXY": f"{gateway},127.0.0.1,localhost",
+                        **timing["env"]}.items():
         command += ["--agent-env", f"{name}={value}"]
     environment = child_env(gateway, env)
     key = environment.pop("OPENAI_API_KEY", "")
@@ -274,7 +294,8 @@ def run_trial(mode: str, *, task: Path, cassette: Path, agent: str | None = None
         commands = command_trace(Path(result["trial_dir"]))
         if not recording and commands != reference:
             raise TrialFailure("divergence", "Harbor tool-call trajectory differs from the recording")
-    except (TrialFailure, OSError) as error:
+        measured = tool_seconds(Path(result["trial_dir"]), agent, agent_version)
+    except (TrialFailure, TimingError, OSError) as error:
         status = error.status if isinstance(error, TrialFailure) else "error"
         detail = str(error)
         if audit.is_file():
@@ -290,6 +311,8 @@ def run_trial(mode: str, *, task: Path, cassette: Path, agent: str | None = None
 
     summary = {"mode": mode, "status": "ok", "agent": agent,
                "agent_execution_s": result["phase_seconds"]["agent_execution"],
+               "agent_timeout_multiplier": agent_timeout_multiplier,
+               **measured,
                "harbor_s": elapsed, "model_requests": proxy_summary["requests"],
                "output": str(output), **result}
     _write_json(output / "summary.json", summary)

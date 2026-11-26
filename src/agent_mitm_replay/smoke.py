@@ -114,8 +114,11 @@ timeout_sec = 30
                            mounts=[(str(root / 'replay'), '/app')], env={'OPENAI_API_KEY': ''})
         if (capture['rewards'] != {'reward': 0.0} or replay['rewards'] != capture['rewards']
                 or (root / 'replay' / 'result.txt').read_bytes() != b'smoke'
-                or not 0 < replay['agent_execution_s'] < replay['harbor_s']):
+                or not 0 < replay['agent_execution_s'] < replay['harbor_s']
+                or not capture['tool_s'] > 0 or not replay['tool_s'] > 0
+                or capture['tool_calls'] != 1 or replay['tool_calls'] != 1):
             raise ReplayError(f'{agent} failed replay metric or artifact check: {replay}')
         results[agent] = {'agent_execution_s': replay['agent_execution_s'],
+                          'tool_s': replay['tool_s'],
                           'model_requests': replay['model_requests']}
     return results

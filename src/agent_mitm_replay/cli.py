@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 
 from .runner import AGENTS, CN_MIRRORS, ReplayError, run_trial
+from .timing import TimingError
 
 
 def _mount(value: str) -> tuple[str, str]:
@@ -37,6 +38,8 @@ def main() -> int:
         command.add_argument("--cassette", type=Path, required=True)
         command.add_argument("--output", type=Path)
         command.add_argument("--mount", action="append", type=_mount, default=[])
+        command.add_argument("--agent-timeout-multiplier", type=float,
+                             help="Scale task agent timeout (record default: 1; replay default: recorded value)")
         if mode == "record":
             command.add_argument("--agent", choices=AGENTS, required=True)
             command.add_argument("--model", required=True, help="openai/<model>")
@@ -63,8 +66,9 @@ def main() -> int:
                 upstream=getattr(args, "upstream", None),
                 agent_version=getattr(args, "agent_version", None), model_api=getattr(args, "model_api", None),
                 install_mirrors=_mirrors(args) if args.mode == "record" else None,
+                agent_timeout_multiplier=args.agent_timeout_multiplier,
             )
-    except (ReplayError, OSError, ValueError, KeyError) as error:
+    except (ReplayError, TimingError, OSError, ValueError, KeyError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     print(json.dumps(result, indent=2))

@@ -3,7 +3,7 @@ import json
 import pytest
 
 from agent_mitm_replay.runner import (
-    TrialFailure, check_harbor_result, check_proxy_audit, command_trace,
+    ReplayError, TrialFailure, check_harbor_result, check_proxy_audit, command_trace, run_trial,
 )
 
 
@@ -32,7 +32,7 @@ def test_unsolved_trial_is_distinct_from_timeout(tmp_path):
     assert failure.value.status == 'timeout'
 
 
-def test_harbor_phase_time_is_reported_without_tool_timing(tmp_path):
+def test_harbor_phase_time_remains_separate(tmp_path):
     trial = tmp_path / 'trial'
     trial.mkdir()
     (trial / 'result.json').write_text(json.dumps({
@@ -57,3 +57,15 @@ def test_command_trace_compares_harbor_calls_not_generated_ids_or_output(tmp_pat
     trajectory['steps'][0]['tool_calls'][0]['arguments']['command'] = 'cat other-input'
     path.write_text(json.dumps(trajectory))
     assert command_trace(tmp_path) != recorded
+
+
+@pytest.mark.parametrize('multiplier', [0, -1, float('nan'), float('inf')])
+def test_invalid_agent_timeout_fails_before_creating_cassette(tmp_path, multiplier):
+    task = tmp_path / 'task'
+    task.mkdir()
+    cassette = tmp_path / 'cassette'
+    with pytest.raises(ReplayError, match='finite and positive'):
+        run_trial('record', task=task, cassette=cassette, agent='pi',
+                  model='openai/example', upstream='http://127.0.0.1/v1',
+                  agent_timeout_multiplier=multiplier)
+    assert not cassette.exists()

@@ -211,3 +211,35 @@ def test_truncated_compression_with_terminal_sse_is_not_recorded(tmp_path, encod
     assert list(io.read_flows_from_paths([str(cassette)])) == []
     summary = json.loads(audit.read_text().splitlines()[-1])
     assert summary['errors'] == 1 and summary['total'] == 0
+
+
+@pytest.mark.parametrize('native_seq', ['1', None])
+def test_codex_telemetry_is_authenticated_and_not_recorded_as_model_exchange(tmp_path, monkeypatch, native_seq):
+    monkeypatch.setenv('AMR_TRIAL_TOKEN', 'trial-token')
+    addon = ReplayAddon()
+    path = tmp_path / 'codex-tools.jsonl'
+    attributes = {'event.name': 'codex.tool_result', 'event.timestamp': '2026-11-26T00:00:00Z',
+                  'tool_result_seq': '1', 'call_id': 'call-1', 'duration_ms': '25',
+                  'tool_name': 'exec_command', 'arguments': '{}', 'output': 'ok',
+                  'success': 'true', 'output_truncated': 'false'}
+    if native_seq is None:
+        attributes.pop('tool_result_seq')  # Native Codex 0.80.0 has no sequence field.
+    payload = {'resourceLogs': [{'scopeLogs': [{'logRecords': [{'attributes': [
+        {'key': key, 'value': {'stringValue': value}} for key, value in attributes.items()]}]}]}]}
+    with taddons.context(addon) as settings:
+        settings.configure(addon, amr_codex_tools=str(path))
+        flow = model_flow(path='/amr-logs')
+        flow.request.content = json.dumps(payload).encode()
+        addon.request(flow)
+        assert flow.response.status_code == 400
+        flow.response = None
+        flow.request.headers['authorization'] = 'Bearer trial-token'
+        addon.request(flow)
+        assert flow.response.status_code == 200
+        assert addon.requests == addon.total == addon.errors == 0
+        addon.done()
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert records[0] == {'event': 'otel'}
+    assert records[1]['id'] == 'call-1'
+    assert records[1]['duration_ns'] == 25_000_000
+    assert records[1]['seq'] == (1 if native_seq is not None else None)

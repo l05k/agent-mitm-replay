@@ -6,9 +6,9 @@
 runner passes `--agent codex|openclaw|pi`, a pinned `version` agent kwarg and
 the model endpoint through Harbor's `--agent-env`. Harbor installs and
 configures the CLI in the container, runs the agent, writes the agent logs and
-standard `agent/trajectory.json`, and runs the verifier. The only custom
-component in a measured trial is the local mitmproxy addon in front of the
-model endpoint.
+standard `agent/trajectory.json`, and runs the verifier. Custom code is limited
+to the local model HTTP proxy and timing-only native event collection; it does
+not replace Harbor's agents or tool execution.
 
 The proxy accepts only the selected model route: `/v1/responses` for the
 default Codex, `/v1/chat/completions` for OpenClaw/Pi and explicitly selected
@@ -46,6 +46,22 @@ installers and the agent CLIs is left in place.
 
 ## Timing
 
+`tool_s` sums each native tool call's execution duration. It excludes model
+waiting between calls and does not subtract one metric from another to infer
+tool time. Overlapping parallel calls are each counted in full, so this is not
+the union of execution intervals and can exceed agent wall time. Missing or
+incomplete native timing evidence fails the trial instead of returning an
+estimate. Tool names and arguments are still compared using Harbor's standard
+trajectory, not by comparing timing values or tool outputs.
+
+Pi uses a timing-only extension on native `tool_execution_start` /
+`tool_execution_end`, measured with a monotonic clock. OpenClaw uses its native
+`after_tool_call.durationMs` hook. Codex exports native `codex.tool_result`
+durations to an authenticated local OTLP endpoint on the existing proxy; those
+requests never reach the model provider or enter the cassette. The timing
+records must cover the tool-call IDs in the same run's Harbor trajectory.
+IDs are not compared between record and replay.
+
 `agent_execution_s` is the duration of Harbor's `agent_execution` phase in the
 trial result. It includes the agent's model exchanges, tool execution and
 harness overhead. Do not describe it as native tool wall time, tool latency or
@@ -54,8 +70,9 @@ model latency.
 `harbor_s` is wall-clock time around the Harbor subprocess. It includes
 environment setup, agent installation and configuration, agent execution, the
 verifier and teardown; treat it as diagnostic only. `phase_seconds` reports
-each Harbor phase that has start and finish timestamps. Accepted replays are
-compared on `agent_execution_s`, never on capture runs or `harbor_s`.
+each Harbor phase that has start and finish timestamps. Compare `tool_s` and
+`agent_execution_s` as separate metrics on accepted offline replays only, never
+capture runs or `harbor_s`.
 
 Agent installation happens in Harbor's `agent_setup` phase, outside
 `agent_execution_s`. Configuration is not uniformly outside it: for example,
